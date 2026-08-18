@@ -199,7 +199,7 @@ async function getHostHealth() {
   return sanitizeHealth(stored[HOST_HEALTH_KEY]);
 }
 
-async function rememberHosts(hosts) {
+async function rememberHosts(hosts, kind = "vod") {
   if (!Array.isArray(hosts) || !hosts.length) return;
   const health = await getHostHealth();
   const now = Date.now();
@@ -210,6 +210,7 @@ async function rememberHosts(hosts) {
       successes: 0,
       failures: 0,
       ...(health[validation.host] || {}),
+      kind,
       lastSeenAt: now
     };
   }
@@ -230,6 +231,7 @@ async function saveBenchmarkHealth(results) {
     };
     const next = {
       ...old,
+      kind: result.kind === "live" ? "live" : old.kind || "vod",
       lastSeenAt: now,
       lastTestedAt: now
     };
@@ -252,7 +254,7 @@ async function saveBenchmarkHealth(results) {
   });
 }
 
-async function rememberPlaybackFailure(host) {
+async function rememberPlaybackFailure(host, kind = "vod") {
   const validation = validateCdnHost(host || "");
   if (!validation.ok) return;
   const health = await getHostHealth();
@@ -262,6 +264,7 @@ async function rememberPlaybackFailure(host) {
   };
   health[validation.host] = {
     ...old,
+    kind: old.kind || kind,
     failures: (old.failures || 0) + 1,
     playbackFailures: (old.playbackFailures || 0) + 1,
     lastFailureAt: Date.now(),
@@ -275,6 +278,8 @@ async function rememberPlaybackFailure(host) {
 function learnedCandidates(health) {
   return Object.entries(health)
     .filter(([, item]) => {
+      // 直播主机路径绑定当前流，对点播必然失败，不进入点播学习候选。
+      if (item.kind === "live") return false;
       const successes = item.successes || 0;
       const failures = item.failures || 0;
       return successes > 0 || failures < 3;
@@ -570,7 +575,7 @@ function observePlayurlUrls(tabId, values, videoValues = []) {
     count: urls.length,
     hosts: hosts.length
   });
-  void rememberHosts(hosts);
+  void rememberHosts(hosts, isLiveTab(state) ? "live" : "vod");
   return hosts;
 }
 
@@ -592,8 +597,10 @@ function observeLiveMedia(tabId, state, url, source, { autorun = true } = {}) {
       void removeRule(tabId);
     }
   } else if (
-    !state.sampleUrl ||
-    mediaKindFromUrl(state.sampleUrl) === "live"
+    // 只有 FLV 能当流族锚点：HLS 分段秒级轮换且必然伴随播放列表出现，
+    // 用分段锚定会让测速落在转瞬过期的路径上。
+    /\.flv(?:$|[?#])/i.test(url.pathname) &&
+    (!state.sampleUrl || mediaKindFromUrl(state.sampleUrl) === "live")
   ) {
     state.sampleUrl = url.href;
   }
@@ -1378,7 +1385,7 @@ async function recoverFromPlaybackStall(tabId, details = {}) {
       [...state.stalledHosts, currentHost],
       MAX_BENCHMARK_HOSTS
     );
-    await rememberPlaybackFailure(currentHost);
+    await rememberPlaybackFailure(currentHost, live ? "live" : "vod");
     if (!live) {
       await saveConfig({
         autoBestHost: "",

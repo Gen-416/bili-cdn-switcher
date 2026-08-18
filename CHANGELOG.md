@@ -45,6 +45,10 @@ Nothing yet.
   redirects to the target's fully signed URL while remaining old-prefix
   requests (HLS segments) are prefix-mapped to the target cluster (verified:
   same-name segments interchange across issuances).
+- Tag host-health entries with a live/vod kind so live gotcha hosts never
+  leak into VOD learned candidates (their paths are stream-bound and always
+  fail on VOD), and anchor the live stream family only on playlists and FLV
+  URLs — never on second-lived HLS segments.
 - Recover live observation after service-worker restarts by asking the page
   player for its current stream URL (`getPlayerInfo().playurl`): an FLV
   session emits exactly one network event at connection time, so a restarted

@@ -27,6 +27,18 @@ test("直播测速前按冷却重放播放接口收割轮换候选", () => {
   assert.match(pageHook, /publish\(data, requestUrl\)/);
 });
 
+test("直播健康记录不进入点播学习候选", () => {
+  assert.match(
+    serviceWorker,
+    /rememberHosts\(hosts, isLiveTab\(state\) \? "live" : "vod"\)/
+  );
+  assert.match(serviceWorker, /item\.kind === "live"\) return false/);
+  assert.match(
+    serviceWorker,
+    /kind: result\.kind === "live" \? "live" : old\.kind \|\| "vod"/
+  );
+});
+
 test("后台失忆后可向播放器查询当前流地址自愈", () => {
   assert.match(contentScript, /GET_LIVE_PLAYER_URL/);
   assert.match(contentScript, /bilibili-cdn-switcher:query-player/);
