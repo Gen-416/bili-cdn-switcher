@@ -13,7 +13,9 @@ import {
   isLivePlaybackUrl,
   isPlaybackUrl,
   isSupportedMediaUrl,
+  learnedCandidates,
   makeProbeRange,
+  sanitizeHealth,
   normalizeCdnHosts,
   planStallRecovery,
   playbackPageKey,
@@ -491,6 +493,56 @@ test("直播媒体 URL 进入白名单并支持 host 替换", () => {
   assert.equal(
     replaceMediaHost(flv, "d1--ov-gotcha07b.bilivideo.com"),
     flv.replace("d1--ov-gotcha07.", "d1--ov-gotcha07b.")
+  );
+});
+
+test("健康记录按 TTL 清理，直播条目不进入点播学习候选", () => {
+  const now = 1_000_000_000_000;
+  const health = sanitizeHealth(
+    {
+      "upos-sz-mirrorcos.bilivideo.com": {
+        successes: 2,
+        failures: 0,
+        lastSeenAt: now - 1000,
+        mbps: 12
+      },
+      "d1--ov-gotcha207.bilivideo.com": {
+        kind: "live",
+        successes: 3,
+        failures: 0,
+        lastSeenAt: now - 500,
+        mbps: 5
+      },
+      "upos-sz-mirrorhw.bilivideo.com": {
+        successes: 0,
+        failures: 5,
+        lastSeenAt: now - 2000
+      },
+      "stale.bilivideo.com": {
+        successes: 9,
+        failures: 0,
+        lastSeenAt: now - 40 * 24 * 60 * 60 * 1000
+      },
+      "evil.example": { successes: 1, failures: 0, lastSeenAt: now }
+    },
+    { now }
+  );
+  assert.equal("stale.bilivideo.com" in health, false);
+  assert.equal("evil.example" in health, false);
+  assert.equal("upos-sz-mirrorhw.bilivideo.com" in health, true);
+
+  const learned = learnedCandidates(health);
+  assert.deepEqual(
+    learned.map((item) => item.host),
+    ["upos-sz-mirrorcos.bilivideo.com"]
+  );
+
+  const capped = sanitizeHealth(health, { now, maxEntries: 1 });
+  assert.deepEqual(Object.keys(capped).length, 1);
+  assert.equal(
+    (Object.values(capped)[0].successes || 0) > 0,
+    true,
+    "容量收紧时优先保留健康条目"
   );
 });
 

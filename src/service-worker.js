@@ -8,9 +8,9 @@ import {
   isAutoRefreshActivityEligible,
   isBilibiliInitiator,
   isCandidateMediaUrl,
-  isLivePlaybackUrl,
   isPlaybackUrl,
   isSupportedMediaUrl,
+  learnedCandidates,
   makeProbeRange,
   normalizeCdnHosts,
   planStallRecovery,
@@ -19,6 +19,7 @@ import {
   retainRecentStalledHosts,
   resolveAutoRefreshProfile,
   sameMediaPath,
+  sanitizeHealth,
   selectRecoveryBenchmark,
   shouldReleaseExpiredAutoRule,
   uniqueCandidates,
@@ -26,16 +27,20 @@ import {
 } from "./core.js";
 import {
   buildLiveBenchmarkSpec,
-  buildLiveProtocolRule,
-  buildLiveRedirectRules,
-  isLivePlaylistUrl,
-  latestLiveSegmentUrl,
   liveCandidateHosts,
   liveFamilyUrl,
-  livePlayurlUrls,
-  liveStreamKey,
   mediaKindFromUrl
 } from "./live-core.js";
+import {
+  applyLiveObservation,
+  chooseLiveRules,
+  isLiveTab,
+  liveCandidatesFor,
+  queryLivePlayerUrl,
+  resetLiveObservation,
+  syncLiveProtocolRule,
+  testLiveCandidate
+} from "./live-controller.js";
 
 const CONFIG_KEY = "config";
 const HOST_HEALTH_KEY = "hostHealth";
@@ -49,10 +54,8 @@ const SUSTAINED_FINALISTS = 3;
 const BENCHMARK_SCHEMA = 3;
 const MAX_EVENTS = 24;
 const MAX_PLAYURL_URLS = 80;
-const MAX_LEARNED_HOSTS = 24;
 const MAX_BENCHMARK_HOSTS = 8;
 const RECENT_STALL_HOST_LIMIT = 3;
-const HOST_HEALTH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const AUTO_ACTIVITY_RETRY_MS = 30 * 1000;
 const AUTO_FAILURE_RETRY_MS = 5 * 60 * 1000;
 const MIN_RECOVERY_SWITCH_INTERVAL_MS = 7 * 1000;
@@ -169,31 +172,6 @@ function autoResultStatus(config) {
   });
 }
 
-function sanitizeHealth(raw) {
-  const now = Date.now();
-  const entries = Object.entries(raw && typeof raw === "object" ? raw : {})
-    .filter(([host, item]) => {
-      const validation = validateCdnHost(host);
-      return (
-        validation.ok &&
-        item &&
-        typeof item === "object" &&
-        Number.isFinite(item.lastSeenAt) &&
-        now - item.lastSeenAt < HOST_HEALTH_TTL_MS
-      );
-    })
-    .sort((a, b) => {
-      const aItem = a[1];
-      const bItem = b[1];
-      const aHealthy = (aItem.successes || 0) > 0;
-      const bHealthy = (bItem.successes || 0) > 0;
-      if (aHealthy !== bHealthy) return aHealthy ? -1 : 1;
-      return (bItem.lastSeenAt || 0) - (aItem.lastSeenAt || 0);
-    })
-    .slice(0, MAX_LEARNED_HOSTS);
-  return Object.fromEntries(entries);
-}
-
 async function getHostHealth() {
   const stored = await chrome.storage.local.get(HOST_HEALTH_KEY);
   return sanitizeHealth(stored[HOST_HEALTH_KEY]);
@@ -275,39 +253,6 @@ async function rememberPlaybackFailure(host, kind = "vod") {
   });
 }
 
-function learnedCandidates(health) {
-  return Object.entries(health)
-    .filter(([, item]) => {
-      // 直播主机路径绑定当前流，对点播必然失败，不进入点播学习候选。
-      if (item.kind === "live") return false;
-      const successes = item.successes || 0;
-      const failures = item.failures || 0;
-      return successes > 0 || failures < 3;
-    })
-    .sort((a, b) => {
-      const aItem = a[1];
-      const bItem = b[1];
-      const aRatio =
-        (aItem.successes || 0) /
-        Math.max((aItem.successes || 0) + (aItem.failures || 0), 1);
-      const bRatio =
-        (bItem.successes || 0) /
-        Math.max((bItem.successes || 0) + (bItem.failures || 0), 1);
-      return (
-        bRatio - aRatio ||
-        (bItem.mbps || 0) - (aItem.mbps || 0) ||
-        (bItem.lastSeenAt || 0) - (aItem.lastSeenAt || 0)
-      );
-    })
-    .map(([host, item]) => ({
-      host,
-      label: host,
-      note: Number.isFinite(item.mbps)
-        ? `近期成功，约 ${item.mbps} Mbps；真实卡顿 ${item.playbackFailures || 0} 次`
-        : "近期播放中出现"
-    }));
-}
-
 function playurlHosts(state) {
   return [
     ...new Set(
@@ -318,23 +263,9 @@ function playurlHosts(state) {
   ];
 }
 
-function isLiveTab(state) {
-  return isLivePlaybackUrl(state.pageUrl);
-}
-
 async function candidatesFor(config, state) {
   if (isLiveTab(state)) {
-    const family = liveFamilyUrl(state);
-    const observedCandidate =
-      state.observedHost && family ? state.observedHost : "";
-    return uniqueCandidates(
-      [],
-      config.customHosts,
-      observedCandidate,
-      liveCandidateHosts(state.playurlUrls, family),
-      [],
-      config.disabledHosts
-    );
+    return liveCandidatesFor(config, state);
   }
   const health = await getHostHealth();
   const observedCandidate =
@@ -446,21 +377,12 @@ async function applyRule(tabId) {
 
   let rules = [];
   if (isLiveTab(state)) {
-    // 目标在不同集群（路径前缀不同）时用入口重定向 + 前缀映射双规则，
-    // 目标是同集群兄弟（路径相同）时退回单纯 host 替换。
-    const familyUrl = liveFamilyUrl(state);
-    const familyUrls = [familyUrl, ...livePlayurlUrls(state.playurlUrls, familyUrl)];
-    const targetUrl = familyUrls
-      .slice(1)
-      .find((value) => new URL(value).hostname === validation.host);
-    if (targetUrl) {
-      rules = buildLiveRedirectRules({
-        tabId,
-        ruleIds: liveRuleIdsForTab(tabId),
-        targetUrl,
-        familyUrls
-      });
-    }
+    rules = chooseLiveRules({
+      tabId,
+      ruleIds: liveRuleIdsForTab(tabId),
+      state,
+      targetHost: validation.host
+    });
   }
   if (!rules.length) {
     rules = [
@@ -580,29 +502,10 @@ function observePlayurlUrls(tabId, values, videoValues = []) {
 }
 
 function observeLiveMedia(tabId, state, url, source, { autorun = true } = {}) {
-  state.observedHost = url.hostname;
-  if (isLivePlaylistUrl(url.href)) {
-    // 流名（key）变化意味着播放器拿到了新的流（重连换清晰度或重新推流），
-    // 旧流的测速结果与规则全部失效；同流换集群（前缀变化）不算换流。
-    const familyChanged =
-      state.livePlaylistUrl &&
-      liveStreamKey(state.livePlaylistUrl) !== liveStreamKey(url.href);
-    state.livePlaylistUrl = url.href;
-    if (familyChanged) {
-      state.autoHost = "";
-      state.autoAttempted = false;
-      state.benchmarks = [];
-      state.stalledHosts = [];
-      appendEvent(tabId, { kind: "live-family-changed", host: url.hostname });
-      void removeRule(tabId);
-    }
-  } else if (
-    // 只有 FLV 能当流族锚点：HLS 分段秒级轮换且必然伴随播放列表出现，
-    // 用分段锚定会让测速落在转瞬过期的路径上。
-    /\.flv(?:$|[?#])/i.test(url.pathname) &&
-    (!state.sampleUrl || mediaKindFromUrl(state.sampleUrl) === "live")
-  ) {
-    state.sampleUrl = url.href;
+  const { familyChanged } = applyLiveObservation(state, url);
+  if (familyChanged) {
+    appendEvent(tabId, { kind: "live-family-changed", host: url.hostname });
+    void removeRule(tabId);
   }
   appendEvent(tabId, { kind: source, host: url.hostname, live: true });
   if (autorun) void maybeRunAuto(tabId);
@@ -613,22 +516,13 @@ function observeLiveMedia(tabId, state, url, source, { autorun = true } = {}) {
 // 播放器查询它正在播放的流地址，直接重建流族与观测 host。
 async function ensureLiveFamily(tabId, state) {
   if (!isLiveTab(state) || liveFamilyUrl(state)) return;
-  try {
-    const response = await chrome.tabs.sendMessage(tabId, {
-      type: "GET_LIVE_PLAYER_URL"
+  const url = await queryLivePlayerUrl(tabId, (id, message) =>
+    chrome.tabs.sendMessage(id, message)
+  );
+  if (url) {
+    observeLiveMedia(tabId, state, new URL(url), "player", {
+      autorun: false
     });
-    const url = response?.ok ? response.url : "";
-    if (
-      url &&
-      isSupportedMediaUrl(url) &&
-      mediaKindFromUrl(url) === "live"
-    ) {
-      observeLiveMedia(tabId, state, new URL(url), "player", {
-        autorun: false
-      });
-    }
-  } catch {
-    // 页面桥不可用时，等待下一次媒体请求自然重建。
   }
 }
 
@@ -713,136 +607,6 @@ function benchmarkSpec(
     timeoutMs,
     stage
   };
-}
-
-// 直播流不依赖 Range：HLS 先取播放列表再拉最新分片，FLV 直接读流并截断。
-async function testLiveCandidate(spec) {
-  const { host, url: entryUrl } = spec;
-  const maxBytes = Math.min(
-    Math.max(Number(spec.maxBytes) || QUICK_SAMPLE_BYTES, 1),
-    SUSTAINED_SAMPLE_BYTES
-  );
-  const timeoutMs = Math.min(
-    Math.max(Number(spec.timeoutMs) || QUICK_TEST_TIMEOUT_MS, 1000),
-    SUSTAINED_TEST_TIMEOUT_MS
-  );
-  const startedAt = performance.now();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  let response;
-
-  try {
-    let mediaUrl = entryUrl;
-    let ttfbMs = 0;
-    if (spec.playlist) {
-      response = await fetch(entryUrl, {
-        method: "GET",
-        cache: "no-store",
-        credentials: "omit",
-        redirect: "follow",
-        signal: controller.signal
-      });
-      ttfbMs = performance.now() - startedAt;
-      if (!response.ok) {
-        return {
-          host,
-          ok: false,
-          status: response.status,
-          error: `HTTP ${response.status}`,
-          ttfbMs: Math.round(ttfbMs),
-          stage: spec.stage
-        };
-      }
-      const playlistText = await response.text();
-      // 某些节点会返回指向第三方中继域名的变体列表，视为不可用。
-      mediaUrl = latestLiveSegmentUrl(playlistText, response.url);
-      if (!mediaUrl || new URL(mediaUrl).hostname !== host) {
-        return {
-          host,
-          ok: false,
-          status: response.status,
-          error: "播放列表没有同源分片",
-          ttfbMs: Math.round(ttfbMs),
-          stage: spec.stage
-        };
-      }
-    }
-
-    const mediaStartedAt = performance.now();
-    response = await fetch(mediaUrl, {
-      method: "GET",
-      cache: "no-store",
-      credentials: "omit",
-      redirect: "follow",
-      signal: controller.signal
-    });
-    if (!spec.playlist) ttfbMs = performance.now() - startedAt;
-    if (!response.ok) {
-      return {
-        host,
-        ok: false,
-        status: response.status,
-        error: `HTTP ${response.status}`,
-        ttfbMs: Math.round(ttfbMs),
-        stage: spec.stage
-      };
-    }
-    const contentType = response.headers.get("content-type") || "";
-    if (/text\/html|application\/json/i.test(contentType)) {
-      return {
-        host,
-        ok: false,
-        status: response.status,
-        error: "返回内容不是媒体",
-        ttfbMs: Math.round(ttfbMs),
-        stage: spec.stage
-      };
-    }
-
-    const reader = response.body?.getReader();
-    let bytes = 0;
-    if (reader) {
-      while (bytes < maxBytes) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        bytes += value?.byteLength || 0;
-      }
-      await reader.cancel();
-    } else {
-      const buffer = await response.arrayBuffer();
-      bytes = Math.min(buffer.byteLength, maxBytes);
-    }
-
-    const durationMs = Math.max(performance.now() - mediaStartedAt, 1);
-    return {
-      host,
-      ok: bytes > 0,
-      status: response.status,
-      bytes,
-      ttfbMs: Math.round(ttfbMs),
-      durationMs: Math.round(durationMs),
-      mbps: Number(((bytes * 8) / durationMs / 1000).toFixed(2)),
-      redirected: response.redirected,
-      finalHost: new URL(response.url).hostname,
-      source: spec.direct ? "playurl" : "host-swap",
-      stage: spec.stage,
-      rangeAccepted: false,
-      contentType,
-      kind: "live"
-    };
-  } catch (error) {
-    return {
-      host,
-      ok: false,
-      status: response?.status || 0,
-      error:
-        error?.name === "AbortError" ? "超时" : error?.message || "测速失败",
-      ttfbMs: Math.round(performance.now() - startedAt),
-      stage: spec.stage
-    };
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 async function testCandidate(spec) {
@@ -978,33 +742,18 @@ async function refreshPlayurlUrlsFromPage(tabId) {
   }
 }
 
-async function syncLiveProtocolRule(config) {
-  if (config.liveProtocolPreference === "flv") {
-    await chrome.declarativeNetRequest.updateSessionRules({
-      removeRuleIds: [LIVE_PROTOCOL_RULE_ID],
-      addRules: [buildLiveProtocolRule({ id: LIVE_PROTOCOL_RULE_ID })]
-    });
-  } else {
-    await chrome.declarativeNetRequest.updateSessionRules({
-      removeRuleIds: [LIVE_PROTOCOL_RULE_ID]
-    });
-  }
+function syncLiveProtocol(config) {
+  return syncLiveProtocolRule({
+    preference: config.liveProtocolPreference,
+    ruleId: LIVE_PROTOCOL_RULE_ID,
+    updateSessionRules: (options) =>
+      chrome.declarativeNetRequest.updateSessionRules(options)
+  });
 }
 
 // 协议切换后旧流的观测、成绩与规则全部作废，等播放器重连后重新发现。
 async function resetLiveTab(tabId) {
-  const state = stateFor(tabId);
-  state.observedHost = "";
-  state.sampleUrl = "";
-  state.sampleRange = "";
-  state.livePlaylistUrl = "";
-  state.playurlUrls = [];
-  state.playurlVideoUrls = [];
-  state.autoHost = "";
-  state.autoAttempted = false;
-  state.nextAutoRefreshCheckAt = 0;
-  state.benchmarks = [];
-  state.stalledHosts = [];
+  resetLiveObservation(stateFor(tabId));
   await removeRule(tabId);
 }
 
@@ -1657,7 +1406,7 @@ async function handleMessage(message, sender) {
       const next = await saveConfig({
         liveProtocolPreference: message.preference
       });
-      await syncLiveProtocolRule(next);
+      await syncLiveProtocol(next);
       const tabs = await chrome.tabs.query({
         url: ["https://live.bilibili.com/*"]
       });
@@ -1750,7 +1499,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // 会话规则不跨浏览器会话保留，service worker 每次启动时按配置重建。
 void getConfig()
-  .then((config) => syncLiveProtocolRule(config))
+  .then((config) => syncLiveProtocol(config))
   .catch(() => {});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {

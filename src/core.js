@@ -426,6 +426,70 @@ export function isAutoRefreshActivityEligible(
   );
 }
 
+export function sanitizeHealth(
+  raw,
+  {
+    now = Date.now(),
+    ttlMs = 30 * 24 * 60 * 60 * 1000,
+    maxEntries = 24
+  } = {}
+) {
+  const entries = Object.entries(raw && typeof raw === "object" ? raw : {})
+    .filter(([host, item]) => {
+      const validation = validateCdnHost(host);
+      return (
+        validation.ok &&
+        item &&
+        typeof item === "object" &&
+        Number.isFinite(item.lastSeenAt) &&
+        now - item.lastSeenAt < ttlMs
+      );
+    })
+    .sort((a, b) => {
+      const aItem = a[1];
+      const bItem = b[1];
+      const aHealthy = (aItem.successes || 0) > 0;
+      const bHealthy = (bItem.successes || 0) > 0;
+      if (aHealthy !== bHealthy) return aHealthy ? -1 : 1;
+      return (bItem.lastSeenAt || 0) - (aItem.lastSeenAt || 0);
+    })
+    .slice(0, maxEntries);
+  return Object.fromEntries(entries);
+}
+
+export function learnedCandidates(health) {
+  return Object.entries(health && typeof health === "object" ? health : {})
+    .filter(([, item]) => {
+      // 直播主机路径绑定当前流，对点播必然失败，不进入点播学习候选。
+      if (item.kind === "live") return false;
+      const successes = item.successes || 0;
+      const failures = item.failures || 0;
+      return successes > 0 || failures < 3;
+    })
+    .sort((a, b) => {
+      const aItem = a[1];
+      const bItem = b[1];
+      const aRatio =
+        (aItem.successes || 0) /
+        Math.max((aItem.successes || 0) + (aItem.failures || 0), 1);
+      const bRatio =
+        (bItem.successes || 0) /
+        Math.max((bItem.successes || 0) + (bItem.failures || 0), 1);
+      return (
+        bRatio - aRatio ||
+        (bItem.mbps || 0) - (aItem.mbps || 0) ||
+        (bItem.lastSeenAt || 0) - (aItem.lastSeenAt || 0)
+      );
+    })
+    .map(([host, item]) => ({
+      host,
+      label: host,
+      note: Number.isFinite(item.mbps)
+        ? `近期成功，约 ${item.mbps} Mbps；真实卡顿 ${item.playbackFailures || 0} 次`
+        : "近期播放中出现"
+    }));
+}
+
 export function buildSessionRedirectRule({ id, tabId, targetHost, liveOnly = false }) {
   const validation = validateCdnHost(targetHost);
   if (!validation.ok) throw new TypeError(validation.error);

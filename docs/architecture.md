@@ -143,4 +143,6 @@
 - 候选排序与学习：[src/candidates.js](../src/candidates.js)
 - 会话规则与状态管理：[src/service-worker.js](../src/service-worker.js)
 - URL 白名单与替换：[src/core.js](../src/core.js)
-- 直播策略（流族、播放列表、探测）：[src/live-core.js](../src/live-core.js)
+- 直播策略（流族、播放列表、探测规格）：[src/live-core.js](../src/live-core.js)
+- 直播编排（观测状态机、候选、规则选择、探测执行，副作用注入可测）：
+  [src/live-controller.js](../src/live-controller.js)

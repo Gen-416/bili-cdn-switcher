@@ -32,7 +32,6 @@ test("直播健康记录不进入点播学习候选", () => {
     serviceWorker,
     /rememberHosts\(hosts, isLiveTab\(state\) \? "live" : "vod"\)/
   );
-  assert.match(serviceWorker, /item\.kind === "live"\) return false/);
   assert.match(
     serviceWorker,
     /kind: result\.kind === "live" \? "live" : old\.kind \|\| "vod"/

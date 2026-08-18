@@ -45,6 +45,11 @@ Nothing yet.
   redirects to the target's fully signed URL while remaining old-prefix
   requests (HLS segments) are prefix-mapped to the target cluster (verified:
   same-name segments interchange across issuances).
+- Extract live orchestration into `src/live-controller.js` (observation state
+  machine, candidate assembly, rule selection, probe execution) with all side
+  effects injected as parameters, and move the pure host-health helpers into
+  `core.js` — the live layer and health logic now carry behavior-level tests
+  (fake fetch / fake rule APIs) instead of source-text assertions.
 - Tag host-health entries with a live/vod kind so live gotcha hosts never
   leak into VOD learned candidates (their paths are stream-bound and always
   fail on VOD), and anchor the live stream family only on playlists and FLV
