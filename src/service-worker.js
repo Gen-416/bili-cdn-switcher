@@ -574,7 +574,7 @@ function observePlayurlUrls(tabId, values, videoValues = []) {
   return hosts;
 }
 
-function observeLiveMedia(tabId, state, url, source) {
+function observeLiveMedia(tabId, state, url, source, { autorun = true } = {}) {
   state.observedHost = url.hostname;
   if (isLivePlaylistUrl(url.href)) {
     // 流名（key）变化意味着播放器拿到了新的流（重连换清晰度或重新推流），
@@ -598,7 +598,31 @@ function observeLiveMedia(tabId, state, url, source) {
     state.sampleUrl = url.href;
   }
   appendEvent(tabId, { kind: source, host: url.hostname, live: true });
-  void maybeRunAuto(tabId);
+  if (autorun) void maybeRunAuto(tabId);
+}
+
+// FLV 是一条长连接，整场直播只在建连时产生一次 webRequest 事件；
+// service worker 空闲重启后观测状态清零且不会再有新事件。此时向页面
+// 播放器查询它正在播放的流地址，直接重建流族与观测 host。
+async function ensureLiveFamily(tabId, state) {
+  if (!isLiveTab(state) || liveFamilyUrl(state)) return;
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: "GET_LIVE_PLAYER_URL"
+    });
+    const url = response?.ok ? response.url : "";
+    if (
+      url &&
+      isSupportedMediaUrl(url) &&
+      mediaKindFromUrl(url) === "live"
+    ) {
+      observeLiveMedia(tabId, state, new URL(url), "player", {
+        autorun: false
+      });
+    }
+  } catch {
+    // 页面桥不可用时，等待下一次媒体请求自然重建。
+  }
 }
 
 function observeMedia(tabId, value, source = "request", rangeHeader = "") {
@@ -999,6 +1023,7 @@ async function runBenchmark(
 ) {
   const state = stateFor(tabId);
   const live = isLiveTab(state);
+  if (live) await ensureLiveFamily(tabId, state);
   const sampleUrl = live
     ? liveFamilyUrl(state)
     : state.videoSampleUrl || state.sampleUrl;
@@ -1193,6 +1218,7 @@ async function runBenchmark(
 async function maybeRunAuto(tabId) {
   const state = stateFor(tabId);
   const live = isLiveTab(state);
+  if (live && state.playback) await ensureLiveFamily(tabId, state);
   const sampleUrl = live
     ? liveFamilyUrl(state)
     : state.videoSampleUrl || state.sampleUrl;
@@ -1439,6 +1465,7 @@ async function publicState(tabId, pageUrl = "") {
     config.autoRefreshProfile
   );
   const state = pageUrl ? updatePageState(tabId, pageUrl) : stateFor(tabId);
+  await ensureLiveFamily(tabId, state);
   if (state.playback && !state.playurlUrls.length) {
     await refreshPlayurlUrlsFromPage(tabId);
   }

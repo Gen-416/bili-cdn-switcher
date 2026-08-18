@@ -378,6 +378,31 @@
       sendResponse({ ok: true, activity: playbackActivity() });
       return false;
     }
+    if (message.type === "GET_LIVE_PLAYER_URL") {
+      let responded = false;
+      const finish = (url) => {
+        if (responded) return;
+        responded = true;
+        sendResponse({ ok: true, url: typeof url === "string" ? url : "" });
+      };
+      const onInfo = (event) => finish(event.detail?.playurl || "");
+      document.addEventListener(
+        "bilibili-cdn-switcher:player-info",
+        onInfo,
+        { once: true }
+      );
+      document.dispatchEvent(
+        new CustomEvent("bilibili-cdn-switcher:query-player")
+      );
+      setTimeout(() => {
+        document.removeEventListener(
+          "bilibili-cdn-switcher:player-info",
+          onInfo
+        );
+        finish("");
+      }, 300);
+      return true;
+    }
     if (message.type === "RELOAD_LIVE_PLAYER") {
       document.dispatchEvent(
         new CustomEvent("bilibili-cdn-switcher:reload-player")

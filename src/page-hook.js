@@ -229,4 +229,19 @@
       // 播放器暂不可用时，下一次自然重连也会生效。
     }
   });
+
+  // FLV 长连接整场只产生一次网络事件，后台重启后要靠播放器自述恢复观测。
+  document.addEventListener("bilibili-cdn-switcher:query-player", () => {
+    let playurl = "";
+    try {
+      playurl = String(window.livePlayer?.getPlayerInfo?.()?.playurl || "");
+    } catch {
+      playurl = "";
+    }
+    document.dispatchEvent(
+      new CustomEvent("bilibili-cdn-switcher:player-info", {
+        detail: { playurl }
+      })
+    );
+  });
 })();

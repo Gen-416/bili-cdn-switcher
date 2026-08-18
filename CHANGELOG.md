@@ -45,6 +45,11 @@ Nothing yet.
   redirects to the target's fully signed URL while remaining old-prefix
   requests (HLS segments) are prefix-mapped to the target cluster (verified:
   same-name segments interchange across issuances).
+- Recover live observation after service-worker restarts by asking the page
+  player for its current stream URL (`getPlayerInfo().playurl`): an FLV
+  session emits exactly one network event at connection time, so a restarted
+  worker would otherwise stay blind (popup showing zero discovered
+  candidates) until the player reconnected.
 - Add an opt-in "FLV first" live transport toggle: one session rule rewrites
   the player's own playurl API requests to `protocol=0` so Bilibili issues
   the long-connection FLV stream (one-second-segment HLS pays a round-trip
