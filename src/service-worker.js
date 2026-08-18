@@ -26,11 +26,13 @@ import {
 } from "./core.js";
 import {
   buildLiveBenchmarkSpec,
+  buildLiveRedirectRules,
   isLivePlaylistUrl,
   latestLiveSegmentUrl,
   liveCandidateHosts,
   liveFamilyUrl,
   livePlayurlUrls,
+  liveStreamKey,
   mediaKindFromUrl
 } from "./live-core.js";
 
@@ -345,9 +347,44 @@ function ruleIdForTab(tabId) {
   return id;
 }
 
+// 直播跨集群切换最多需要三条附加规则（入口重定向 + 两个旧集群前缀映射）。
+const LIVE_RULE_ID_OFFSETS = [
+  1_000_000_000, 1_100_000_000, 1_200_000_000
+];
+
+function liveRuleIdsForTab(tabId) {
+  return LIVE_RULE_ID_OFFSETS.map((offset) => {
+    const id = offset + tabId;
+    if (id > 2_147_483_647) throw new RangeError("标签页 ID 超出规则范围");
+    return id;
+  });
+}
+
+function allRuleIdsForTab(tabId) {
+  return [ruleIdForTab(tabId), ...liveRuleIdsForTab(tabId)];
+}
+
+function activeRuleTarget(rules, tabId) {
+  const ids = new Set(allRuleIdsForTab(tabId));
+  for (const rule of rules) {
+    if (!ids.has(rule.id)) continue;
+    const redirect = rule.action?.redirect || {};
+    try {
+      if (redirect.transform?.host) return redirect.transform.host;
+      if (redirect.url) return new URL(redirect.url).hostname;
+      if (redirect.regexSubstitution) {
+        return new URL(redirect.regexSubstitution.replace(/\\1$/, "")).hostname;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return "";
+}
+
 async function removeRule(tabId) {
   await chrome.declarativeNetRequest.updateSessionRules({
-    removeRuleIds: [ruleIdForTab(tabId)]
+    removeRuleIds: allRuleIdsForTab(tabId)
   });
   try {
     await setBadge(tabId, false);
@@ -397,16 +434,37 @@ async function applyRule(tabId) {
     return "";
   }
 
-  const id = ruleIdForTab(tabId);
-  const rule = buildSessionRedirectRule({
-    id,
-    tabId,
-    targetHost: validation.host,
-    liveOnly: isLiveTab(state)
-  });
+  let rules = [];
+  if (isLiveTab(state)) {
+    // 目标在不同集群（路径前缀不同）时用入口重定向 + 前缀映射双规则，
+    // 目标是同集群兄弟（路径相同）时退回单纯 host 替换。
+    const familyUrl = liveFamilyUrl(state);
+    const familyUrls = [familyUrl, ...livePlayurlUrls(state.playurlUrls, familyUrl)];
+    const targetUrl = familyUrls
+      .slice(1)
+      .find((value) => new URL(value).hostname === validation.host);
+    if (targetUrl) {
+      rules = buildLiveRedirectRules({
+        tabId,
+        ruleIds: liveRuleIdsForTab(tabId),
+        targetUrl,
+        familyUrls
+      });
+    }
+  }
+  if (!rules.length) {
+    rules = [
+      buildSessionRedirectRule({
+        id: ruleIdForTab(tabId),
+        tabId,
+        targetHost: validation.host,
+        liveOnly: isLiveTab(state)
+      })
+    ];
+  }
   await chrome.declarativeNetRequest.updateSessionRules({
-    removeRuleIds: [id],
-    addRules: [rule]
+    removeRuleIds: allRuleIdsForTab(tabId),
+    addRules: rules
   });
   await setBadge(tabId, true, config.mode);
   return validation.host;
@@ -514,10 +572,11 @@ function observePlayurlUrls(tabId, values, videoValues = []) {
 function observeLiveMedia(tabId, state, url, source) {
   state.observedHost = url.hostname;
   if (isLivePlaylistUrl(url.href)) {
-    // 路径变化意味着播放器拿到了新签发的流（重连或切换清晰度），
-    // 旧族的测速结果与规则全部失效。
+    // 流名（key）变化意味着播放器拿到了新的流（重连换清晰度或重新推流），
+    // 旧流的测速结果与规则全部失效；同流换集群（前缀变化）不算换流。
     const familyChanged =
-      state.livePlaylistUrl && !sameMediaPath(state.livePlaylistUrl, url.href);
+      state.livePlaylistUrl &&
+      liveStreamKey(state.livePlaylistUrl) !== liveStreamKey(url.href);
     state.livePlaylistUrl = url.href;
     if (familyChanged) {
       state.autoHost = "";
@@ -883,6 +942,21 @@ async function refreshPlayurlUrlsFromPage(tabId) {
   }
 }
 
+// 直播主机对按播放接口调用轮换分配，让页面按冷却重放一次播放器
+// 自己的 playurl 请求，把轮换签发的新集群并入候选池后再选测速对象。
+async function harvestLivePlayurlFromPage(tabId) {
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: "HARVEST_LIVE_PLAYURL"
+    });
+    if (response?.ok && Array.isArray(response.urls)) {
+      observePlayurlUrls(tabId, response.urls, response.videoUrls);
+    }
+  } catch {
+    // 收割是可选增强；已捕获的同族候选仍然可用。
+  }
+}
+
 async function runBenchmark(
   tabId,
   requestedHosts = null,
@@ -901,6 +975,9 @@ async function runBenchmark(
   }
   if (state.benchmarkRunning) {
     throw new Error("测速正在进行中");
+  }
+  if (live) {
+    await harvestLivePlayurlFromPage(tabId);
   }
   if (!state.playurlUrls.length) {
     await refreshPlayurlUrlsFromPage(tabId);
@@ -1227,9 +1304,8 @@ async function recoverFromPlaybackStall(tabId, details = {}) {
     }
 
     const rules = await chrome.declarativeNetRequest.getSessionRules();
-    const activeRule = rules.find((rule) => rule.id === ruleIdForTab(tabId));
     const currentHost =
-      activeRule?.action?.redirect?.transform?.host ||
+      activeRuleTarget(rules, tabId) ||
       state.autoHost ||
       "";
     if (!currentHost) {
@@ -1334,10 +1410,9 @@ async function publicState(tabId, pageUrl = "") {
   const targetHost =
     config.mode === "auto" ? state.autoHost : config.manualHost;
   const rules = await chrome.declarativeNetRequest.getSessionRules();
-  const activeRule = rules.find((rule) => rule.id === ruleIdForTab(tabId));
-  const ruleActive = Boolean(activeRule);
-  const ruleHost =
-    activeRule?.action?.redirect?.transform?.host || targetHost || "";
+  const activeTarget = activeRuleTarget(rules, tabId);
+  const ruleActive = Boolean(activeTarget);
+  const ruleHost = activeTarget || targetHost || "";
   const candidates = await candidatesFor(config, state);
   return {
     version: extensionVersion(),
@@ -1382,10 +1457,9 @@ async function diagnosticState(tabId) {
   const targetHost =
     config.mode === "auto" ? state.autoHost : config.manualHost;
   const rules = await chrome.declarativeNetRequest.getSessionRules();
-  const activeRule = rules.find((rule) => rule.id === ruleIdForTab(tabId));
-  const ruleActive = Boolean(activeRule);
-  const ruleHost =
-    activeRule?.action?.redirect?.transform?.host || targetHost || "";
+  const activeTarget = activeRuleTarget(rules, tabId);
+  const ruleActive = Boolean(activeTarget);
+  const ruleHost = activeTarget || targetHost || "";
   return {
     version: extensionVersion(),
     enabled: config.enabled,
@@ -1666,6 +1740,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabStates.delete(tabId);
   void chrome.declarativeNetRequest.updateSessionRules({
-    removeRuleIds: [ruleIdForTab(tabId)]
+    removeRuleIds: allRuleIdsForTab(tabId)
   });
 });

@@ -34,6 +34,17 @@ Nothing yet.
   second-scale buffer thresholds, shorter observation window, and a rebound
   tolerance above one segment so one-second HLS sawtooth is not mistaken for
   drain.
+- Harvest rotated live candidates before benchmarking: the content script
+  replays the player's own playurl request (same parameters, GET, at most
+  twice per 60 seconds) to collect the alternate CDN clusters Bilibili
+  rotates across issuances — the only workable way to grow the live pool,
+  since VOD UPOS seeds 403 on `/live-bvc/` and unsigned cluster hosts fail.
+- Identify a live stream by its name after the `/live-bvc/<n>/` prefix (the
+  prefix is a per-issuance routing token, verified to rotate on every call),
+  and switch across issuances with a two-rule redirect: the entry path
+  redirects to the target's fully signed URL while remaining old-prefix
+  requests (HLS segments) are prefix-mapped to the target cluster (verified:
+  same-name segments interchange across issuances).
 
 ## [1.8.4] - 2026-07-27
 

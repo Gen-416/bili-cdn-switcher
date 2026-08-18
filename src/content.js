@@ -18,6 +18,110 @@
   const healthOptions = isLivePage
     ? playbackHealth?.LIVE_OPTIONS
     : undefined;
+  const harvestCooldownMs = 60000;
+  let lastPlayurlRequestUrl = "";
+  let lastHarvestAt = 0;
+
+  const livePlayurlPaths = [
+    "/xlive/web-room/v2/index/getRoomPlayInfo",
+    "/xlive/web-room/v1/index/getInfoByRoom"
+  ];
+
+  const rememberPlayurlRequest = (value) => {
+    try {
+      const url = new URL(value);
+      if (
+        url.protocol === "https:" &&
+        (url.hostname === "bilibili.com" ||
+          url.hostname.endsWith(".bilibili.com")) &&
+        livePlayurlPaths.some((path) => url.pathname.startsWith(path))
+      ) {
+        lastPlayurlRequestUrl = url.href;
+      }
+    } catch {
+      // Ignore malformed request URLs from the host page.
+    }
+  };
+
+  const collectLiveMediaUrls = (root) => {
+    const urls = [];
+    const seen = new WeakSet();
+    const visit = (item, depth = 0) => {
+      if (
+        depth > 20 ||
+        item == null ||
+        typeof item !== "object" ||
+        seen.has(item)
+      ) {
+        return;
+      }
+      seen.add(item);
+      if (typeof item.base_url === "string" && Array.isArray(item.url_info)) {
+        for (const info of item.url_info) {
+          if (
+            info &&
+            typeof info.host === "string" &&
+            typeof info.extra === "string"
+          ) {
+            urls.push(info.host + item.base_url + info.extra);
+          }
+        }
+      }
+      for (const value of Object.values(item)) visit(value, depth + 1);
+    };
+    visit(root);
+    return urls
+      .filter((value) => {
+        try {
+          const url = new URL(value);
+          return (
+            url.hostname.endsWith(".bilivideo.com") &&
+            url.pathname.includes("/live-bvc/")
+          );
+        } catch {
+          return false;
+        }
+      })
+      .slice(0, 80);
+  };
+
+  // 直播候选只能来自 B 站签发，而播放接口每次调用会轮换主机分配。
+  // 收割 = 按冷却重放播放器自己发过的 playurl 请求（同参数 GET、页面凭据），
+  // 把轮换出的新集群并入候选池。这是直播下扩大候选的唯一有效途径。
+  const harvestLivePlayurl = async () => {
+    if (
+      isLivePage &&
+      lastPlayurlRequestUrl &&
+      Date.now() - lastHarvestAt >= harvestCooldownMs
+    ) {
+      lastHarvestAt = Date.now();
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const response = await fetch(lastPlayurlRequestUrl, {
+            cache: "no-store",
+            credentials: "include"
+          });
+          if (response.ok) {
+            const harvested = collectLiveMediaUrls(await response.json());
+            if (harvested.length) {
+              latestPlayurlUrls = [
+                ...new Set([...harvested, ...latestPlayurlUrls])
+              ].slice(0, 80);
+              latestPlayurlVideoUrls = [
+                ...new Set([...harvested, ...latestPlayurlVideoUrls])
+              ].slice(0, 80);
+            }
+          }
+        } catch {
+          // 单次收割失败不影响已有候选。
+        }
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+      }
+    }
+    return { urls: latestPlayurlUrls, videoUrls: latestPlayurlVideoUrls };
+  };
   let stallTimer = 0;
   let lastStallReportAt = 0;
   let lastStallHost = "";
@@ -273,6 +377,17 @@
     if (message.type === "GET_PLAYBACK_ACTIVITY") {
       sendResponse({ ok: true, activity: playbackActivity() });
       return false;
+    }
+    if (message.type === "HARVEST_LIVE_PLAYURL") {
+      harvestLivePlayurl()
+        .then((result) => sendResponse({ ok: true, ...result }))
+        .catch((error) =>
+          sendResponse({
+            ok: false,
+            error: error?.message || "重取播放接口失败"
+          })
+        );
+      return true;
     }
     if (message.type !== "RUN_PAGE_BENCHMARK") return false;
 
@@ -597,6 +712,9 @@
             })
             .slice(0, 80)
           : [];
+      if (typeof event.detail?.requestUrl === "string") {
+        rememberPlayurlRequest(event.detail.requestUrl);
+      }
       const urls = sanitizeMediaUrls(event.detail?.urls);
       const videoUrls = sanitizeMediaUrls(event.detail?.videoUrls);
       if (urls.length) {
@@ -621,6 +739,8 @@
     if (type === "NAVIGATION") {
       latestPlayurlUrls = [];
       latestPlayurlVideoUrls = [];
+      lastPlayurlRequestUrl = "";
+      lastHarvestAt = 0;
       resetPlaybackHealth();
       lastStallReportAt = 0;
       lastStallHost = "";

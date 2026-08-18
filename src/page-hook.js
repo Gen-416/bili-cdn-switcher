@@ -120,20 +120,20 @@
     };
   };
 
-  const publish = (playInfo) => {
+  const publish = (playInfo, requestUrl = "") => {
     const media = collectMediaUrls(playInfo);
     if (!media.urls.length) return;
     document.dispatchEvent(
       new CustomEvent(eventName, {
-        detail: media
+        detail: { ...media, requestUrl }
       })
     );
   };
 
-  const inspectJsonText = (text) => {
+  const inspectJsonText = (text, requestUrl = "") => {
     if (typeof text !== "string" || !text) return;
     try {
-      publish(JSON.parse(text));
+      publish(JSON.parse(text), requestUrl);
     } catch {
       // A failed parse must never affect the page's original response.
     }
@@ -145,9 +145,18 @@
       window.fetch = function observedFetch(input, init) {
         const responsePromise = originalFetch.call(this, input, init);
         if (isPlayurlRequest(input)) {
+          let requestUrl = "";
+          try {
+            requestUrl = new URL(
+              typeof input === "string" ? input : input.url,
+              location.href
+            ).href;
+          } catch {
+            requestUrl = "";
+          }
           responsePromise
             .then((response) => response.clone().json())
-            .then(publish)
+            .then((data) => publish(data, requestUrl))
             .catch(() => {});
         }
         return responsePromise;
@@ -161,17 +170,23 @@
     const originalOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function observedOpen(method, url, ...rest) {
       if (isPlayurlRequest(url)) {
+        let requestUrl = "";
+        try {
+          requestUrl = new URL(url, location.href).href;
+        } catch {
+          requestUrl = "";
+        }
         this.addEventListener(
           "load",
           () => {
             try {
               if (this.responseType === "json") {
-                publish(this.response);
+                publish(this.response, requestUrl);
               } else if (
                 this.responseType === "" ||
                 this.responseType === "text"
               ) {
-                inspectJsonText(this.responseText);
+                inspectJsonText(this.responseText, requestUrl);
               }
             } catch {
               // Reading an unsupported responseType should not affect XHR.

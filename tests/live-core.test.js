@@ -3,11 +3,14 @@ import test from "node:test";
 
 import {
   buildLiveBenchmarkSpec,
+  buildLiveRedirectRules,
   isLivePlaylistUrl,
   latestLiveSegmentUrl,
   liveCandidateHosts,
+  liveClusterPrefix,
   liveFamilyUrl,
   livePlayurlUrls,
+  liveStreamKey,
   mediaKindFromUrl
 } from "../src/live-core.js";
 
@@ -18,7 +21,7 @@ const FLV_07B =
   "https://d1--ov-gotcha07b.bilivideo.com/live-bvc/864118/live_x_y.flv?" +
   "expires=1&trid=a&sigparams=cdn&cdn=ov-gotcha07&sign=abc";
 const FLV_05 =
-  "https://d1--ov-gotcha05.bilivideo.com/live-bvc/864118/live_x_y.flv?" +
+  "https://d1--ov-gotcha05.bilivideo.com/live-bvc/504451/live_x_y.flv?" +
   "expires=2&trid=b&sigparams=cdn&cdn=ov-gotcha05&sign=def";
 const PLAYLIST_207 =
   "https://d1--ov-gotcha207.bilivideo.com/live-bvc/551288/live_x_y/index.m3u8?expires=1";
@@ -48,7 +51,16 @@ test("直播流族优先播放列表，其次直播样本", () => {
   assert.equal(liveFamilyUrl({}), "");
 });
 
-test("直播候选只保留与当前流同路径的签发地址", () => {
+test("按集群前缀之外的流名识别同一路流", () => {
+  assert.equal(liveStreamKey(FLV_07), "live_x_y.flv");
+  assert.equal(liveStreamKey(FLV_05), "live_x_y.flv");
+  assert.equal(liveStreamKey(PLAYLIST_207), "live_x_y/index.m3u8");
+  assert.equal(liveStreamKey("https://a.bilivideo.com/upgcxcode/a.m4s"), "");
+  assert.equal(liveClusterPrefix(FLV_07), "/live-bvc/864118/");
+  assert.equal(liveClusterPrefix(FLV_05), "/live-bvc/504451/");
+});
+
+test("直播候选保留同一路流的全部集群签发地址", () => {
   const pool = [FLV_07, FLV_07B, FLV_05, PLAYLIST_207];
   assert.deepEqual(livePlayurlUrls(pool, FLV_07), [FLV_07, FLV_07B, FLV_05]);
   assert.deepEqual(livePlayurlUrls(pool, PLAYLIST_207), [PLAYLIST_207]);
@@ -58,6 +70,41 @@ test("直播候选只保留与当前流同路径的签发地址", () => {
     "d1--ov-gotcha07b.bilivideo.com",
     "d1--ov-gotcha05.bilivideo.com"
   ]);
+});
+
+test("跨集群切换生成入口重定向与前缀映射双规则", () => {
+  const familyUrls = [FLV_07, FLV_07B, FLV_05];
+  const rules = buildLiveRedirectRules({
+    tabId: 42,
+    ruleIds: [1000000042, 1100000042, 1200000042],
+    targetUrl: FLV_05,
+    familyUrls
+  });
+  assert.equal(rules.length, 2);
+  const [entryRule, prefixRule] = rules;
+  assert.equal(entryRule.priority, 2);
+  assert.equal(entryRule.action.redirect.url, FLV_05);
+  assert.match(
+    entryRule.condition.regexFilter,
+    /864118\/live_x_y\\\.flv/
+  );
+  assert.deepEqual(entryRule.condition.tabIds, [42]);
+  assert.equal(prefixRule.priority, 1);
+  assert.equal(
+    prefixRule.action.redirect.regexSubstitution,
+    "https://d1--ov-gotcha05.bilivideo.com/live-bvc/504451/\\1"
+  );
+  assert.match(prefixRule.condition.regexFilter, /864118/);
+});
+
+test("同集群兄弟节点不需要跨集群规则", () => {
+  const rules = buildLiveRedirectRules({
+    tabId: 42,
+    ruleIds: [1000000042, 1100000042, 1200000042],
+    targetUrl: FLV_07B,
+    familyUrls: [FLV_07, FLV_07B]
+  });
+  assert.deepEqual(rules, []);
 });
 
 test("直播探测优先使用主机自己的签发 URL，换 host 仅兜底", () => {

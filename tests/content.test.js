@@ -15,6 +15,18 @@ const serviceWorker = await readFile(
   "utf8"
 );
 
+test("直播测速前按冷却重放播放接口收割轮换候选", () => {
+  assert.match(contentScript, /HARVEST_LIVE_PLAYURL/);
+  assert.match(contentScript, /harvestCooldownMs = 60000/);
+  assert.match(contentScript, /credentials: "include"/);
+  assert.match(
+    contentScript,
+    /rememberPlayurlRequest\(event\.detail\.requestUrl\)/
+  );
+  assert.match(serviceWorker, /HARVEST_LIVE_PLAYURL/);
+  assert.match(pageHook, /publish\(data, requestUrl\)/);
+});
+
 test("直播页使用直播健康阈值", () => {
   assert.match(
     contentScript,
