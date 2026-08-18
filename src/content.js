@@ -14,6 +14,10 @@
   const preemptiveConfirmMs = 1500;
   const maximumHealthSamples = 10;
   const playbackHealth = globalThis.BiliCdnPlaybackHealth;
+  const isLivePage = location.hostname === "live.bilibili.com";
+  const healthOptions = isLivePage
+    ? playbackHealth?.LIVE_OPTIONS
+    : undefined;
   let stallTimer = 0;
   let lastStallReportAt = 0;
   let lastStallHost = "";
@@ -103,7 +107,8 @@
           /\.(?:m4s|mp4|flv)(?:$|[?#])/i.test(
             url.pathname + url.search
           ) ||
-          url.pathname.includes("/upgcxcode/")
+          url.pathname.includes("/upgcxcode/") ||
+          url.pathname.includes("/live-bvc/")
         )
       ) {
         throw new Error("样本 URL 不属于 bilivideo.com");
@@ -412,9 +417,12 @@
             `${recovery.fromHost || ""}->${recoveryTarget}`;
           const retryPlayback = () => {
             if (!video.isConnected || video.ended) return;
-            const resumeAt = Math.max(0, video.currentTime - 1);
             try {
-              video.currentTime = resumeAt;
+              // 直播流（duration 为 Infinity）不做回退 seek，
+              // 让播放器沿新规则自行重连到直播沿。
+              if (Number.isFinite(video.duration)) {
+                video.currentTime = Math.max(0, video.currentTime - 1);
+              }
               void video.play().catch(() => {});
             } catch {
               // The player can recover on its next retry even if seeking fails.
@@ -507,7 +515,7 @@
     healthSamples = healthSamples.slice(-maximumHealthSamples);
     if (
       preemptiveTimer ||
-      !playbackHealth.shouldPreemptivelyRecover(healthSamples)
+      !playbackHealth.shouldPreemptivelyRecover(healthSamples, healthOptions)
     ) {
       return;
     }
@@ -526,7 +534,9 @@
       }
       healthSamples.push(healthSample(video));
       healthSamples = healthSamples.slice(-maximumHealthSamples);
-      if (playbackHealth.shouldPreemptivelyRecover(healthSamples)) {
+      if (
+        playbackHealth.shouldPreemptivelyRecover(healthSamples, healthOptions)
+      ) {
         requestStallRecovery(video, "buffer-draining");
       }
     }, preemptiveConfirmMs);
@@ -580,7 +590,8 @@
                   /\.(?:m4s|mp4|flv)(?:$|[?#])/i.test(
                     url.pathname + url.search
                   ) ||
-                  url.pathname.includes("/upgcxcode/")
+                  url.pathname.includes("/upgcxcode/") ||
+                  url.pathname.includes("/live-bvc/")
                 )
               );
             })

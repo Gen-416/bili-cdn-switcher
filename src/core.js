@@ -76,10 +76,21 @@ export function isBilibiliInitiator(value) {
   return isBilibiliHost(value);
 }
 
+export function isLivePlaybackUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.hostname !== "live.bilibili.com") return false;
+    return /^\/(?:blanc\/)?\d+\/?$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
 export function isPlaybackUrl(value) {
   try {
     const url = new URL(value);
     if (!isBilibiliHost(url.hostname)) return false;
+    if (isLivePlaybackUrl(url.href)) return true;
     return /^\/(video\/|bangumi\/play\/|cheese\/play\/)/.test(url.pathname);
   } catch {
     return false;
@@ -98,6 +109,9 @@ export function playbackPageKey(value) {
         meaningfulParams.set(key, url.searchParams.get(key));
       }
     }
+    if (isLivePlaybackUrl(url.href)) {
+      url.pathname = url.pathname.replace(/^\/blanc\//, "/");
+    }
     const pathname = url.pathname.replace(/\/+$/, "") || "/";
     const query = meaningfulParams.toString();
     return `${url.origin}${pathname}${query ? `?${query}` : ""}`;
@@ -114,7 +128,8 @@ export function isSupportedMediaUrl(value) {
       url.hostname.endsWith(BILIVIDEO_SUFFIX) &&
       (
         /\.(?:m4s|mp4|flv)(?:$|[?#])/i.test(url.pathname + url.search) ||
-        url.pathname.includes("/upgcxcode/")
+        url.pathname.includes("/upgcxcode/") ||
+        url.pathname.includes("/live-bvc/")
       )
     );
   } catch {
@@ -411,11 +426,22 @@ export function isAutoRefreshActivityEligible(
   );
 }
 
-export function buildSessionRedirectRule({ id, tabId, targetHost }) {
+export function buildSessionRedirectRule({ id, tabId, targetHost, liveOnly = false }) {
   const validation = validateCdnHost(targetHost);
   if (!validation.ok) throw new TypeError(validation.error);
   if (!Number.isInteger(id) || id <= 0) throw new TypeError("规则 ID 无效");
   if (!Number.isInteger(tabId) || tabId < 0) throw new TypeError("标签页 ID 无效");
+
+  const condition = {
+    tabIds: [tabId],
+    initiatorDomains: ["bilibili.com"],
+    requestDomains: ["bilivideo.com"],
+    excludedRequestDomains: [validation.host],
+    resourceTypes: ["media", "xmlhttprequest", "other"]
+  };
+  // 直播规则把作用面收窄到直播媒体路径，避免直播页上偶发的
+  // 其他 bilivideo 请求（预览、点播小窗）被误重定向到直播节点。
+  if (liveOnly) condition.urlFilter = "/live-bvc/";
 
   return {
     id,
@@ -429,12 +455,6 @@ export function buildSessionRedirectRule({ id, tabId, targetHost }) {
         }
       }
     },
-    condition: {
-      tabIds: [tabId],
-      initiatorDomains: ["bilibili.com"],
-      requestDomains: ["bilivideo.com"],
-      excludedRequestDomains: [validation.host],
-      resourceTypes: ["media", "xmlhttprequest", "other"]
-    }
+    condition
   };
 }

@@ -12,6 +12,21 @@
     maximumReboundSeconds: 0.5
   });
 
+  // 直播缓冲以秒计（实测常态 2–10 秒，1 秒小分段让缓冲呈锯齿波动）：
+  // 触发区间和净流出阈值整体压缩到直播尺度，观察窗缩短，
+  // 回补容差放宽到一个分段以上，避免正常锯齿打断趋势累计。
+  const LIVE_OPTIONS = Object.freeze({
+    ...DEFAULT_OPTIONS,
+    lowBufferSeconds: 4,
+    minimumDrainSeconds: 2.5,
+    minimumWindowMs: 6000,
+    maximumWindowMs: 12000,
+    minimumPlaybackAdvanceSeconds: 4,
+    minimumSamples: 4,
+    decliningSampleCount: 4,
+    maximumReboundSeconds: 1.25
+  });
+
   const finite = (value) => Number.isFinite(Number(value));
 
   const validSample = (sample) =>
@@ -132,6 +147,7 @@
     writable: false,
     value: Object.freeze({
       DEFAULT_OPTIONS,
+      LIVE_OPTIONS,
       shouldPreemptivelyRecover,
       recoveryCooldownRemaining
     })

@@ -8,6 +8,7 @@ import {
   isAutoRefreshActivityEligible,
   isBilibiliInitiator,
   isCandidateMediaUrl,
+  isLivePlaybackUrl,
   isPlaybackUrl,
   isSupportedMediaUrl,
   makeProbeRange,
@@ -23,6 +24,15 @@ import {
   uniqueCandidates,
   validateCdnHost
 } from "./core.js";
+import {
+  buildLiveBenchmarkSpec,
+  isLivePlaylistUrl,
+  latestLiveSegmentUrl,
+  liveCandidateHosts,
+  liveFamilyUrl,
+  livePlayurlUrls,
+  mediaKindFromUrl
+} from "./live-core.js";
 
 const CONFIG_KEY = "config";
 const HOST_HEALTH_KEY = "hostHealth";
@@ -74,6 +84,7 @@ function stateFor(tabId) {
       sampleRange: "",
       videoSampleUrl: "",
       videoSampleRange: "",
+      livePlaylistUrl: "",
       playurlUrls: [],
       playurlVideoUrls: [],
       autoHost: "",
@@ -295,7 +306,24 @@ function playurlHosts(state) {
   ];
 }
 
+function isLiveTab(state) {
+  return isLivePlaybackUrl(state.pageUrl);
+}
+
 async function candidatesFor(config, state) {
+  if (isLiveTab(state)) {
+    const family = liveFamilyUrl(state);
+    const observedCandidate =
+      state.observedHost && family ? state.observedHost : "";
+    return uniqueCandidates(
+      [],
+      config.customHosts,
+      observedCandidate,
+      liveCandidateHosts(state.playurlUrls, family),
+      [],
+      config.disabledHosts
+    );
+  }
   const health = await getHostHealth();
   const observedCandidate =
     state.sampleUrl && isCandidateMediaUrl(state.sampleUrl)
@@ -346,12 +374,23 @@ async function applyRule(tabId) {
     config.mode === "auto" ? state.autoHost : config.manualHost;
   const validation = validateCdnHost(targetHost || "");
   const disabled = new Set(config.disabledHosts || []);
-  const shouldEnable =
+  let shouldEnable =
     config.enabled &&
     state.playback &&
     isPlaybackUrl(state.pageUrl) &&
     validation.ok &&
     !disabled.has(validation.host);
+
+  // 直播手动模式下，跨流沿用的 host（多半是点播 UPOS 或过期集群）
+  // 无法服务当前直播路径，只放行当前流签发、实际观测或用户自定义的节点。
+  if (shouldEnable && config.mode === "manual" && isLiveTab(state)) {
+    const allowed = new Set([
+      state.observedHost,
+      ...liveCandidateHosts(state.playurlUrls, liveFamilyUrl(state)),
+      ...config.customHosts
+    ]);
+    shouldEnable = allowed.has(validation.host);
+  }
 
   if (!shouldEnable) {
     await removeRule(tabId);
@@ -362,7 +401,8 @@ async function applyRule(tabId) {
   const rule = buildSessionRedirectRule({
     id,
     tabId,
-    targetHost: validation.host
+    targetHost: validation.host,
+    liveOnly: isLiveTab(state)
   });
   await chrome.declarativeNetRequest.updateSessionRules({
     removeRuleIds: [id],
@@ -380,7 +420,8 @@ async function applyToKnownPlaybackTabs() {
       "https://www.bilibili.com/bangumi/play/*",
       "https://www.bilibili.com/cheese/play/*",
       "https://m.bilibili.com/video/*",
-      "https://m.bilibili.com/bangumi/play/*"
+      "https://m.bilibili.com/bangumi/play/*",
+      "https://live.bilibili.com/*"
     ]
   });
   await Promise.all(
@@ -388,11 +429,11 @@ async function applyToKnownPlaybackTabs() {
       .filter((tab) => Number.isInteger(tab.id))
       .map(async (tab) => {
         const state = stateFor(tab.id);
-        state.playback = true;
         state.pageUrl = tab.url || "";
+        state.playback = isPlaybackUrl(state.pageUrl);
         state.pageKey = playbackPageKey(state.pageUrl);
         const cachedHost = freshAutoHost(config);
-        if (config.mode === "auto" && cachedHost) {
+        if (config.mode === "auto" && cachedHost && !isLiveTab(state)) {
           state.autoHost = cachedHost;
         }
         await applyRule(tab.id);
@@ -416,6 +457,7 @@ function updatePageState(tabId, pageUrl) {
     state.sampleRange = "";
     state.videoSampleUrl = "";
     state.videoSampleRange = "";
+    state.livePlaylistUrl = "";
     state.playurlUrls = [];
     state.playurlVideoUrls = [];
     state.autoHost = "";
@@ -469,10 +511,40 @@ function observePlayurlUrls(tabId, values, videoValues = []) {
   return hosts;
 }
 
+function observeLiveMedia(tabId, state, url, source) {
+  state.observedHost = url.hostname;
+  if (isLivePlaylistUrl(url.href)) {
+    // 路径变化意味着播放器拿到了新签发的流（重连或切换清晰度），
+    // 旧族的测速结果与规则全部失效。
+    const familyChanged =
+      state.livePlaylistUrl && !sameMediaPath(state.livePlaylistUrl, url.href);
+    state.livePlaylistUrl = url.href;
+    if (familyChanged) {
+      state.autoHost = "";
+      state.autoAttempted = false;
+      state.benchmarks = [];
+      state.stalledHosts = [];
+      appendEvent(tabId, { kind: "live-family-changed", host: url.hostname });
+      void removeRule(tabId);
+    }
+  } else if (
+    !state.sampleUrl ||
+    mediaKindFromUrl(state.sampleUrl) === "live"
+  ) {
+    state.sampleUrl = url.href;
+  }
+  appendEvent(tabId, { kind: source, host: url.hostname, live: true });
+  void maybeRunAuto(tabId);
+}
+
 function observeMedia(tabId, value, source = "request", rangeHeader = "") {
   if (tabId < 0 || !isSupportedMediaUrl(value)) return;
   const state = stateFor(tabId);
   const url = new URL(value);
+  if (mediaKindFromUrl(url.href) === "live") {
+    observeLiveMedia(tabId, state, url, source);
+    return;
+  }
   state.observedHost = url.hostname;
   const isVideoSample = state.playurlVideoUrls.some((candidate) =>
     sameMediaPath(candidate, url.href)
@@ -548,7 +620,138 @@ function benchmarkSpec(
   };
 }
 
+// 直播流不依赖 Range：HLS 先取播放列表再拉最新分片，FLV 直接读流并截断。
+async function testLiveCandidate(spec) {
+  const { host, url: entryUrl } = spec;
+  const maxBytes = Math.min(
+    Math.max(Number(spec.maxBytes) || QUICK_SAMPLE_BYTES, 1),
+    SUSTAINED_SAMPLE_BYTES
+  );
+  const timeoutMs = Math.min(
+    Math.max(Number(spec.timeoutMs) || QUICK_TEST_TIMEOUT_MS, 1000),
+    SUSTAINED_TEST_TIMEOUT_MS
+  );
+  const startedAt = performance.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+
+  try {
+    let mediaUrl = entryUrl;
+    let ttfbMs = 0;
+    if (spec.playlist) {
+      response = await fetch(entryUrl, {
+        method: "GET",
+        cache: "no-store",
+        credentials: "omit",
+        redirect: "follow",
+        signal: controller.signal
+      });
+      ttfbMs = performance.now() - startedAt;
+      if (!response.ok) {
+        return {
+          host,
+          ok: false,
+          status: response.status,
+          error: `HTTP ${response.status}`,
+          ttfbMs: Math.round(ttfbMs),
+          stage: spec.stage
+        };
+      }
+      const playlistText = await response.text();
+      // 某些节点会返回指向第三方中继域名的变体列表，视为不可用。
+      mediaUrl = latestLiveSegmentUrl(playlistText, response.url);
+      if (!mediaUrl || new URL(mediaUrl).hostname !== host) {
+        return {
+          host,
+          ok: false,
+          status: response.status,
+          error: "播放列表没有同源分片",
+          ttfbMs: Math.round(ttfbMs),
+          stage: spec.stage
+        };
+      }
+    }
+
+    const mediaStartedAt = performance.now();
+    response = await fetch(mediaUrl, {
+      method: "GET",
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "follow",
+      signal: controller.signal
+    });
+    if (!spec.playlist) ttfbMs = performance.now() - startedAt;
+    if (!response.ok) {
+      return {
+        host,
+        ok: false,
+        status: response.status,
+        error: `HTTP ${response.status}`,
+        ttfbMs: Math.round(ttfbMs),
+        stage: spec.stage
+      };
+    }
+    const contentType = response.headers.get("content-type") || "";
+    if (/text\/html|application\/json/i.test(contentType)) {
+      return {
+        host,
+        ok: false,
+        status: response.status,
+        error: "返回内容不是媒体",
+        ttfbMs: Math.round(ttfbMs),
+        stage: spec.stage
+      };
+    }
+
+    const reader = response.body?.getReader();
+    let bytes = 0;
+    if (reader) {
+      while (bytes < maxBytes) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value?.byteLength || 0;
+      }
+      await reader.cancel();
+    } else {
+      const buffer = await response.arrayBuffer();
+      bytes = Math.min(buffer.byteLength, maxBytes);
+    }
+
+    const durationMs = Math.max(performance.now() - mediaStartedAt, 1);
+    return {
+      host,
+      ok: bytes > 0,
+      status: response.status,
+      bytes,
+      ttfbMs: Math.round(ttfbMs),
+      durationMs: Math.round(durationMs),
+      mbps: Number(((bytes * 8) / durationMs / 1000).toFixed(2)),
+      redirected: response.redirected,
+      finalHost: new URL(response.url).hostname,
+      source: spec.direct ? "playurl" : "host-swap",
+      stage: spec.stage,
+      rangeAccepted: false,
+      contentType,
+      kind: "live"
+    };
+  } catch (error) {
+    return {
+      host,
+      ok: false,
+      status: response?.status || 0,
+      error:
+        error?.name === "AbortError" ? "超时" : error?.message || "测速失败",
+      ttfbMs: Math.round(performance.now() - startedAt),
+      stage: spec.stage
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function testCandidate(spec) {
+  if (spec.kind === "live") return testLiveCandidate(spec);
   const { host, url: testUrl, range: sampleRange } = spec;
   const maxBytes = Math.min(
     Math.max(Number(spec.maxBytes) || QUICK_SAMPLE_BYTES, 1),
@@ -686,11 +889,14 @@ async function runBenchmark(
   { preserveStalledHosts = false } = {}
 ) {
   const state = stateFor(tabId);
-  const sampleUrl = state.videoSampleUrl || state.sampleUrl;
+  const live = isLiveTab(state);
+  const sampleUrl = live
+    ? liveFamilyUrl(state)
+    : state.videoSampleUrl || state.sampleUrl;
   const sampleRange = state.videoSampleUrl
     ? state.videoSampleRange
     : state.sampleRange;
-  if (!sampleUrl || !sampleRange) {
+  if (!sampleUrl || (!live && !sampleRange)) {
     throw new Error("还没有捕获到媒体 URL。请先播放几秒视频，再测速。");
   }
   if (state.benchmarkRunning) {
@@ -701,6 +907,7 @@ async function runBenchmark(
   }
 
   const config = await getConfig();
+  const preferredHost = live ? state.autoHost : config.autoBestHost;
   const allCandidates = await candidatesFor(config, state);
   const requested = Array.isArray(requestedHosts)
     ? new Set(requestedHosts)
@@ -712,16 +919,25 @@ async function runBenchmark(
     : allCandidates.filter((item) => !item.disabled);
   const candidates = chooseBenchmarkCandidates(
     eligible,
-    config.autoBestHost,
+    preferredHost,
     MAX_BENCHMARK_HOSTS
   );
   if (!candidates.length) throw new Error("没有可测速的候选 CDN");
   const quickSpecs = candidates.map((candidate) =>
-    benchmarkSpec(state, candidate, {
-      maxBytes: QUICK_SAMPLE_BYTES,
-      timeoutMs: QUICK_TEST_TIMEOUT_MS,
-      stage: "quick"
-    })
+    live
+      ? buildLiveBenchmarkSpec({
+          familyUrl: sampleUrl,
+          playurlUrls: state.playurlUrls,
+          host: candidate.host,
+          maxBytes: QUICK_SAMPLE_BYTES,
+          timeoutMs: QUICK_TEST_TIMEOUT_MS,
+          stage: "quick"
+        })
+      : benchmarkSpec(state, candidate, {
+          maxBytes: QUICK_SAMPLE_BYTES,
+          timeoutMs: QUICK_TEST_TIMEOUT_MS,
+          stage: "quick"
+        })
   );
 
   state.benchmarkRunning = true;
@@ -737,6 +953,13 @@ async function runBenchmark(
   await pushDiagnostics(tabId);
   try {
     const runSpecs = async (specs, concurrency) => {
+      // 直播探测需要解析播放列表并二次拉取分片，统一在后台完成
+      //（实测直播边缘节点不校验 Referer）。
+      if (live) {
+        return mapWithConcurrency(specs, concurrency, (spec) =>
+          testCandidate(spec)
+        );
+      }
       try {
         return await testCandidatesInPage(tabId, specs, concurrency);
       } catch (pageError) {
@@ -772,12 +995,21 @@ async function runBenchmark(
       candidates.map((candidate) => [candidate.host, candidate])
     );
     const sustainedSpecs = finalists.map((result) =>
-      benchmarkSpec(state, candidateByHost.get(result.host), {
-        maxBytes: SUSTAINED_SAMPLE_BYTES,
-        offsetBytes: QUICK_SAMPLE_BYTES,
-        timeoutMs: SUSTAINED_TEST_TIMEOUT_MS,
-        stage: "sustained"
-      })
+      live
+        ? buildLiveBenchmarkSpec({
+            familyUrl: sampleUrl,
+            playurlUrls: state.playurlUrls,
+            host: result.host,
+            maxBytes: SUSTAINED_SAMPLE_BYTES,
+            timeoutMs: SUSTAINED_TEST_TIMEOUT_MS,
+            stage: "sustained"
+          })
+        : benchmarkSpec(state, candidateByHost.get(result.host), {
+            maxBytes: SUSTAINED_SAMPLE_BYTES,
+            offsetBytes: QUICK_SAMPLE_BYTES,
+            timeoutMs: SUSTAINED_TEST_TIMEOUT_MS,
+            stage: "sustained"
+          })
     );
     const sustainedResults = sustainedSpecs.length
       ? await runSpecs(sustainedSpecs, 1)
@@ -806,10 +1038,10 @@ async function runBenchmark(
 
     let best = preserveStalledHosts
       ? selectRecoveryBenchmark(results, "", state.stalledHosts)
-      : chooseAutoBenchmark(results, config.autoBestHost);
+      : chooseAutoBenchmark(results, preferredHost);
     if (!best && preserveStalledHosts) {
       state.stalledHosts = [];
-      best = chooseAutoBenchmark(results, config.autoBestHost);
+      best = chooseAutoBenchmark(results, preferredHost);
     }
     const freshConfig = await getConfig();
     const disabled = new Set(freshConfig.disabledHosts || []);
@@ -820,11 +1052,14 @@ async function runBenchmark(
       best
     ) {
       state.autoHost = best.host;
-      await saveConfig({
-        autoBestHost: best.host,
-        autoBestAt: Date.now(),
-        autoBestSchema: BENCHMARK_SCHEMA
-      });
+      // 直播结果绑定当前流的签发路径，不进入跨页的全局缓存。
+      if (!live) {
+        await saveConfig({
+          autoBestHost: best.host,
+          autoBestAt: Date.now(),
+          autoBestSchema: BENCHMARK_SCHEMA
+        });
+      }
       await applyRule(tabId);
     } else if (freshConfig.enabled && freshConfig.mode === "manual") {
       await applyRule(tabId);
@@ -845,54 +1080,62 @@ async function runBenchmark(
 
 async function maybeRunAuto(tabId) {
   const state = stateFor(tabId);
-  const sampleUrl = state.videoSampleUrl || state.sampleUrl;
+  const live = isLiveTab(state);
+  const sampleUrl = live
+    ? liveFamilyUrl(state)
+    : state.videoSampleUrl || state.sampleUrl;
   const sampleRange = state.videoSampleUrl
     ? state.videoSampleRange
     : state.sampleRange;
   if (
     state.benchmarkRunning ||
     !sampleUrl ||
-    !sampleRange
+    (!live && !sampleRange)
   ) {
     return;
   }
   const config = await getConfig();
   if (!config.enabled || config.mode !== "auto" || !state.playback) return;
-  const cachedHost = freshAutoHost(config);
-  const resultStatus = autoResultStatus(config);
-  if (
-    shouldReleaseExpiredAutoRule(
-      resultStatus,
-      cachedHost,
-      state.autoHost
-    )
-  ) {
-    const expiredHost = state.autoHost;
-    state.autoHost = "";
-    state.autoAttempted = false;
-    await removeRule(tabId);
-    appendEvent(tabId, {
-      kind: "expired-rule-released",
-      host: expiredHost
-    });
-    await pushDiagnostics(tabId);
-  }
-  if (cachedHost && resultStatus === "fresh") {
-    if (state.autoAttempted && state.autoHost === cachedHost) return;
-    state.autoAttempted = true;
-    state.autoHost = cachedHost;
-    appendEvent(tabId, {
-      kind: "benchmark-cache",
-      host: cachedHost
-    });
-    await applyRule(tabId);
-    await pushDiagnostics(tabId);
-    return;
-  }
+  if (live) {
+    // 直播不读写全局缓存：每路流只测一次，流族变化时会重置重测。
+    if (state.autoAttempted) return;
+  } else {
+    const cachedHost = freshAutoHost(config);
+    const resultStatus = autoResultStatus(config);
+    if (
+      shouldReleaseExpiredAutoRule(
+        resultStatus,
+        cachedHost,
+        state.autoHost
+      )
+    ) {
+      const expiredHost = state.autoHost;
+      state.autoHost = "";
+      state.autoAttempted = false;
+      await removeRule(tabId);
+      appendEvent(tabId, {
+        kind: "expired-rule-released",
+        host: expiredHost
+      });
+      await pushDiagnostics(tabId);
+    }
+    if (cachedHost && resultStatus === "fresh") {
+      if (state.autoAttempted && state.autoHost === cachedHost) return;
+      state.autoAttempted = true;
+      state.autoHost = cachedHost;
+      appendEvent(tabId, {
+        kind: "benchmark-cache",
+        host: cachedHost
+      });
+      await applyRule(tabId);
+      await pushDiagnostics(tabId);
+      return;
+    }
 
-  if (cachedHost && state.autoHost !== cachedHost) {
-    state.autoHost = cachedHost;
-    await applyRule(tabId);
+    if (cachedHost && state.autoHost !== cachedHost) {
+      state.autoHost = cachedHost;
+      await applyRule(tabId);
+    }
   }
 
   const now = Date.now();
@@ -915,7 +1158,8 @@ async function maybeRunAuto(tabId) {
       type: "GET_PLAYBACK_ACTIVITY"
     });
     const activity = response?.ok ? response.activity : null;
-    const requireSafeBuffer = Boolean(state.autoHost);
+    // 直播的前向缓冲天然只有几秒，安全缓冲门槛只适用于点播。
+    const requireSafeBuffer = Boolean(state.autoHost) && !live;
     if (
       !isAutoRefreshActivityEligible(activity, {
         requireSafeBuffer
@@ -992,16 +1236,19 @@ async function recoverFromPlaybackStall(tabId, details = {}) {
       return { switched: false, reason: "no-active-host" };
     }
 
+    const live = isLiveTab(state);
     state.stalledHosts = retainRecentStalledHosts(
       [...state.stalledHosts, currentHost],
       MAX_BENCHMARK_HOSTS
     );
     await rememberPlaybackFailure(currentHost);
-    await saveConfig({
-      autoBestHost: "",
-      autoBestAt: 0,
-      autoBestSchema: BENCHMARK_SCHEMA
-    });
+    if (!live) {
+      await saveConfig({
+        autoBestHost: "",
+        autoBestAt: 0,
+        autoBestSchema: BENCHMARK_SCHEMA
+      });
+    }
 
     const disabled = new Set(config.disabledHosts || []);
     const recoveryPlan = planStallRecovery(
@@ -1041,11 +1288,13 @@ async function recoverFromPlaybackStall(tabId, details = {}) {
 
     state.autoHost = next.host;
     const switchedAt = Date.now();
-    await saveConfig({
-      autoBestHost: next.host,
-      autoBestAt: switchedAt,
-      autoBestSchema: BENCHMARK_SCHEMA
-    });
+    if (!live) {
+      await saveConfig({
+        autoBestHost: next.host,
+        autoBestAt: switchedAt,
+        autoBestSchema: BENCHMARK_SCHEMA
+      });
+    }
     await applyRule(tabId);
     state.recoveryCount += 1;
     state.lastRecovery = {
@@ -1109,8 +1358,15 @@ async function publicState(tabId, pageUrl = "") {
     autoResultTtlMs: autoRefreshPolicy.hardTtlMs,
     autoRefreshProfiles: Object.values(AUTO_REFRESH_PROFILES),
     autoResultStatus: autoResultStatus(config),
-    sampleKind: state.videoSampleUrl ? "video" : "media",
-    discoveredCount: playurlHosts(state).length,
+    live: isLiveTab(state),
+    sampleKind: isLiveTab(state)
+      ? "live"
+      : state.videoSampleUrl
+        ? "video"
+        : "media",
+    discoveredCount: isLiveTab(state)
+      ? liveCandidateHosts(state.playurlUrls, liveFamilyUrl(state)).length
+      : playurlHosts(state).length,
     candidates,
     recoveryCount: state.recoveryCount,
     lastRecovery: state.lastRecovery,
@@ -1173,7 +1429,7 @@ async function handleMessage(message, sender) {
     state.contentVersion = message.extensionVersion || "";
     const config = await getConfig();
     const cachedHost = freshAutoHost(config);
-    if (config.mode === "auto" && cachedHost) {
+    if (config.mode === "auto" && cachedHost && !isLiveTab(state)) {
       state.autoHost = cachedHost;
     }
     if (!state.playback) {
@@ -1231,7 +1487,7 @@ async function handleMessage(message, sender) {
         state.autoAttempted = false;
         state.stalledHosts = [];
         const cachedHost = freshAutoHost(config);
-        if (cachedHost) {
+        if (cachedHost && !isLiveTab(state)) {
           state.autoHost = cachedHost;
         }
         await maybeRunAuto(tabId);

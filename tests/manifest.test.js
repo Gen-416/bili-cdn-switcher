@@ -8,7 +8,7 @@ const manifest = JSON.parse(
 
 test("manifest 使用 MV3 且默认没有代理权限", () => {
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "1.8.4");
+  assert.equal(manifest.version, "1.9.0");
   assert.equal("version_name" in manifest, false);
   assert.equal(manifest.permissions.includes("proxy"), false);
   assert.equal(manifest.permissions.includes("webRequestBlocking"), false);
@@ -74,6 +74,7 @@ test("host 权限只覆盖 B 站页面与 bilivideo 媒体", () => {
   assert.deepEqual(manifest.host_permissions, [
     "https://www.bilibili.com/*",
     "https://m.bilibili.com/*",
+    "https://live.bilibili.com/*",
     "https://*.bilivideo.com/*"
   ]);
 });

@@ -190,7 +190,7 @@ function render() {
   elements.autoMode.disabled = !applicable;
   elements.manualMode.disabled = !applicable;
   elements.autoRefreshProfile.disabled =
-    !applicable || currentState.config.mode !== "auto";
+    !applicable || currentState.config.mode !== "auto" || currentState.live;
   elements.autoMode.classList.toggle("active", currentState.config.mode === "auto");
   elements.manualMode.classList.toggle(
     "active",
@@ -201,7 +201,7 @@ function render() {
 
   elements.scopeNotice.classList.toggle("hidden", applicable);
   elements.scopeNotice.textContent =
-    "请在 B 站视频、番剧或课程播放页打开此扩展。其他页面不会建立重定向规则。";
+    "请在 B 站视频、番剧、课程或直播间播放页打开此扩展。其他页面不会建立重定向规则。";
 
   const active = currentState.ruleActive;
   elements.statusDot.classList.toggle("on", active);
@@ -248,14 +248,19 @@ function render() {
   const disabledLabel = disabledCount
     ? `已禁用 ${disabledCount} 个候选；`
     : "";
-  elements.benchmarkHint.textContent =
-    `已从当前播放接口发现 ${currentState.discoveredCount || 0} 个 host；` +
-    sampleLabel +
-    disabledLabel +
-    `先用 ${quickKb || 128} KB 初筛最多 ${currentState.benchmarkLimit || 8} 个，` +
-    `再用 ${sustainedMb || 1} MB 复测前 ${currentState.sustainedFinalists || 3} 个。` +
-    `${profileLabel}档下，自动结果 ${softDuration}后仅在可见播放且缓冲安全时按需复测，` +
-    `${hardDuration}后失效。`;
+  elements.benchmarkHint.textContent = currentState.live
+    ? `直播候选限于当前直播流签发的同族节点（已发现 ${currentState.discoveredCount || 0} 个）；` +
+      disabledLabel +
+      `先用 ${quickKb || 128} KB 初筛，再用 ${sustainedMb || 1} MB 复测前 ` +
+      `${currentState.sustainedFinalists || 3} 个。` +
+      `直播优选结果只对当前一路流有效，重连或切换清晰度后会自动重测。`
+    : `已从当前播放接口发现 ${currentState.discoveredCount || 0} 个 host；` +
+      sampleLabel +
+      disabledLabel +
+      `先用 ${quickKb || 128} KB 初筛最多 ${currentState.benchmarkLimit || 8} 个，` +
+      `再用 ${sustainedMb || 1} MB 复测前 ${currentState.sustainedFinalists || 3} 个。` +
+      `${profileLabel}档下，自动结果 ${softDuration}后仅在可见播放且缓冲安全时按需复测，` +
+      `${hardDuration}后失效。`;
 
   const disabledHosts = new Set(currentState.config.disabledHosts || []);
   const activeSustained = (currentState.benchmarks || []).find(

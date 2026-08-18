@@ -6,6 +6,35 @@ All notable changes to this project are documented here.
 
 Nothing yet.
 
+## [1.9.0] - 2026-08-18
+
+- Add live room support (`live.bilibili.com`): observe `getRoomPlayInfo` /
+  `getInfoByRoom` responses and the `__NEPTUNE_IS_MY_WAIFU__` global, assemble
+  per-host stream URLs from `host + base_url + extra`, and accept `/live-bvc/`
+  media paths across the URL allowlists.
+- Restrict live candidates to same-family hosts issued for the current stream
+  (verified empirically: cross-family swaps 404 and VOD UPOS seeds reject live
+  paths), skipping builtin seeds and learned VOD hosts on live pages.
+- Benchmark live streams without Range headers: fetch the playlist, resolve the
+  newest same-origin segment, then measure a capped segment/FLV read in the
+  service worker.
+- Keep live results per-tab and per-stream: no global auto-best cache reads or
+  writes on live pages, with automatic reset and re-benchmark when the player
+  reconnects or changes quality (stream family path changes).
+- Skip the one-second rewind during stall recovery for live streams and let the
+  player rejoin the live edge; manual mode on live pages only applies hosts
+  issued for or observed on the current stream.
+- Narrow live session rules with a `/live-bvc/` URL filter so unrelated
+  bilivideo requests on a live page are never redirected, and prefer each
+  rotated host's own fully signed URL when probing live candidates.
+- Split live strategy into `src/live-core.js` (family detection, playlist
+  parsing, candidate filtering, probe specs) so live and VOD endpoint
+  semantics stay separate, mirroring the VOD `core.js` pure-function layer.
+- Recalibrate preemptive stall detection for live pages (`LIVE_OPTIONS`):
+  second-scale buffer thresholds, shorter observation window, and a rebound
+  tolerance above one segment so one-second HLS sawtooth is not mistaken for
+  drain.
+
 ## [1.8.4] - 2026-07-27
 
 - Add a seven-second grace period between recoveries after changing CDN hosts,

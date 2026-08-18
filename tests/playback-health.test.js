@@ -10,6 +10,7 @@ const source = await readFile(
 const context = vm.createContext({});
 vm.runInContext(source, context);
 const {
+  LIVE_OPTIONS,
   shouldPreemptivelyRecover,
   recoveryCooldownRemaining
 } = context.BiliCdnPlaybackHealth;
@@ -80,6 +81,39 @@ test("后台或暂停播放不会触发", () => {
   );
   assert.equal(
     shouldPreemptivelyRecover(samples(draining, { playing: false })),
+    false
+  );
+});
+
+test("直播阈值在秒级缓冲净流出时提前恢复，点播阈值不触发", () => {
+  const liveDrain = samples([7, 6.5, 5.5, 4.5, 3.8, 3.2]);
+  assert.equal(shouldPreemptivelyRecover(liveDrain, LIVE_OPTIONS), true);
+  assert.equal(shouldPreemptivelyRecover(liveDrain), false);
+});
+
+test("直播一秒分段的正常锯齿缓冲不会误触发", () => {
+  assert.equal(
+    shouldPreemptivelyRecover(
+      samples([3.5, 4.5, 3.6, 4.4, 3.5, 4.3, 3.4]),
+      LIVE_OPTIONS
+    ),
+    false
+  );
+});
+
+test("直播缓冲耗尽或仍然充足时不做预防切换", () => {
+  assert.equal(
+    shouldPreemptivelyRecover(
+      samples([4, 3.2, 2.4, 1.6, 0.9, 0.3]),
+      LIVE_OPTIONS
+    ),
+    false
+  );
+  assert.equal(
+    shouldPreemptivelyRecover(
+      samples([11, 10, 9, 8, 7, 6]),
+      LIVE_OPTIONS
+    ),
     false
   );
 });

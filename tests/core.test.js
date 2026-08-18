@@ -10,6 +10,7 @@ import {
   isAutoRefreshActivityEligible,
   isBilibiliInitiator,
   isCandidateMediaUrl,
+  isLivePlaybackUrl,
   isPlaybackUrl,
   isSupportedMediaUrl,
   makeProbeRange,
@@ -458,6 +459,41 @@ test("自动刷新只接受可见、正在播放且缓冲安全的页面", () =>
   );
 });
 
+test("识别直播间播放页并归一化 blanc 路径", () => {
+  assert.equal(isLivePlaybackUrl("https://live.bilibili.com/1814371828"), true);
+  assert.equal(
+    isLivePlaybackUrl("https://live.bilibili.com/blanc/23058#/"),
+    true
+  );
+  assert.equal(isLivePlaybackUrl("https://live.bilibili.com/"), false);
+  assert.equal(
+    isLivePlaybackUrl("https://live.bilibili.com/p/eden/area-tags"),
+    false
+  );
+  assert.equal(isLivePlaybackUrl("https://www.bilibili.com/video/BV1x"), false);
+
+  assert.equal(isPlaybackUrl("https://live.bilibili.com/1814371828"), true);
+  assert.equal(
+    playbackPageKey("https://live.bilibili.com/blanc/23058?spm_id_from=x"),
+    playbackPageKey("https://live.bilibili.com/23058")
+  );
+});
+
+test("直播媒体 URL 进入白名单并支持 host 替换", () => {
+  const flv =
+    "https://d1--ov-gotcha07.bilivideo.com/live-bvc/864118/live_x_y.flv?" +
+    "expires=1&sigparams=cdn&cdn=ov-gotcha07&sign=abc";
+  const playlist =
+    "https://d1--ov-gotcha207.bilivideo.com/live-bvc/551288/live_x_y/index.m3u8?expires=1";
+  assert.equal(isSupportedMediaUrl(flv), true);
+  assert.equal(isSupportedMediaUrl(playlist), true);
+  assert.equal(isCandidateMediaUrl(flv), true);
+  assert.equal(
+    replaceMediaHost(flv, "d1--ov-gotcha07b.bilivideo.com"),
+    flv.replace("d1--ov-gotcha07.", "d1--ov-gotcha07b.")
+  );
+});
+
 test("会话规则同时锁定标签页、发起站点和媒体域", () => {
   const rule = buildSessionRedirectRule({
     id: 1000042,
@@ -475,5 +511,21 @@ test("会话规则同时锁定标签页、发起站点和媒体域", () => {
   assert.equal(
     rule.action.redirect.transform.host,
     "upos-sz-mirrorhw.bilivideo.com"
+  );
+  assert.equal("urlFilter" in rule.condition, false);
+});
+
+test("直播规则把作用面收窄到直播媒体路径", () => {
+  const rule = buildSessionRedirectRule({
+    id: 1000043,
+    tabId: 43,
+    targetHost: "d1--ov-gotcha207b.bilivideo.com",
+    liveOnly: true
+  });
+  assert.equal(rule.condition.urlFilter, "/live-bvc/");
+  assert.deepEqual(rule.condition.tabIds, [43]);
+  assert.equal(
+    rule.action.redirect.transform.host,
+    "d1--ov-gotcha207b.bilivideo.com"
   );
 });

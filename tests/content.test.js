@@ -15,6 +15,18 @@ const serviceWorker = await readFile(
   "utf8"
 );
 
+test("直播页使用直播健康阈值", () => {
+  assert.match(
+    contentScript,
+    /isLivePage = location\.hostname === "live\.bilibili\.com"/
+  );
+  assert.match(contentScript, /playbackHealth\?\.LIVE_OPTIONS/);
+  assert.match(
+    contentScript,
+    /shouldPreemptivelyRecover\(healthSamples, healthOptions\)/
+  );
+});
+
 test("恢复 seek 落在冷却期内时会预约下一次卡顿复查", () => {
   assert.match(
     contentScript,
@@ -62,7 +74,7 @@ test("缓冲持续下降时会在耗尽前请求恢复", () => {
   assert.match(contentScript, /preemptiveConfirmMs = 1500/);
   assert.match(
     contentScript,
-    /playbackHealth\.shouldPreemptivelyRecover\(healthSamples\)/
+    /playbackHealth\.shouldPreemptivelyRecover\(healthSamples, healthOptions\)/
   );
   assert.match(
     contentScript,

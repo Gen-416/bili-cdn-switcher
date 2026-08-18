@@ -11,7 +11,9 @@
     "/pgc/player/web/playurl",
     "/pgc/player/api/playurl",
     "/pugv/player/web/playurl",
-    "/ogv/player/playview"
+    "/ogv/player/playview",
+    "/xlive/web-room/v2/index/getRoomPlayInfo",
+    "/xlive/web-room/v1/index/getInfoByRoom"
   ];
 
   const isPlayurlRequest = (value) => {
@@ -53,7 +55,8 @@
               /\.(?:m4s|mp4|flv)(?:$|[?#])/i.test(
                 url.pathname + url.search
               ) ||
-              url.pathname.includes("/upgcxcode/")
+              url.pathname.includes("/upgcxcode/") ||
+              url.pathname.includes("/live-bvc/")
             ) &&
             !seenUrls.has(url.href)
           ) {
@@ -83,6 +86,20 @@
       if (Array.isArray(item)) {
         item.forEach((entry) => visit(entry, depth + 1, mediaKind));
         return;
+      }
+      if (
+        typeof item.base_url === "string" &&
+        Array.isArray(item.url_info)
+      ) {
+        for (const info of item.url_info) {
+          if (
+            info &&
+            typeof info.host === "string" &&
+            typeof info.extra === "string"
+          ) {
+            visit(info.host + item.base_url + info.extra, depth + 1, "video");
+          }
+        }
       }
       Object.entries(item).forEach(([key, entry]) => {
         const nextKind =
@@ -174,6 +191,13 @@
       if (window.__playinfo__) publish(window.__playinfo__);
     } catch {
       // Ignore accessors installed by the host page.
+    }
+    try {
+      if (window.__NEPTUNE_IS_MY_WAIFU__) {
+        publish(window.__NEPTUNE_IS_MY_WAIFU__);
+      }
+    } catch {
+      // Ignore accessors installed by the live host page.
     }
   };
 
