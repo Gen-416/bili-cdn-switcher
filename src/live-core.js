@@ -111,6 +111,37 @@ export function liveCandidateHosts(playurlUrls, familyUrl) {
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+// FLV 优先：改写播放接口请求的 protocol 参数，让 B 站只签发 http_stream
+// （FLV 长连接）。只改自己浏览器发出的请求参数，不触碰响应内容。
+// 实测依据：1 秒小分段 HLS 在高 RTT 链路上每段都付一次往返税并反复冷启动，
+// 同链路 FLV 长连接可稳定跟上实时（docs/research/live-stream-lag-investigation）。
+export const LIVE_PLAYURL_API_REGEX =
+  "^https://api\\.live\\.bilibili\\.com/xlive/web-room/" +
+  "(?:v2/index/getRoomPlayInfo|v1/index/getInfoByRoom)";
+
+export function buildLiveProtocolRule({ id }) {
+  if (!Number.isInteger(id) || id <= 0) throw new TypeError("规则 ID 无效");
+  return {
+    id,
+    priority: 1,
+    action: {
+      type: "redirect",
+      redirect: {
+        transform: {
+          queryTransform: {
+            addOrReplaceParams: [{ key: "protocol", value: "0" }]
+          }
+        }
+      }
+    },
+    condition: {
+      initiatorDomains: ["bilibili.com"],
+      regexFilter: LIVE_PLAYURL_API_REGEX,
+      resourceTypes: ["xmlhttprequest"]
+    }
+  };
+}
+
 // 跨集群切换的两条规则（实测集群会 403 外族路径，单纯换 host 不可用）：
 // 1) 入口规则：把任何已知同流入口路径（播放列表/FLV）整体重定向到目标
 //    集群自己的完整签发 URL——签名随 URL 一起替换，始终合法。

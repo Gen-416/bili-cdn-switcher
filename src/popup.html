@@ -63,6 +63,16 @@
             <option value="economy" data-short-label="低频">低频 · 6 小时</option>
           </select>
         </label>
+        <div class="refresh-setting hidden" id="liveProtocolRow">
+          <span>
+            直播传输协议
+            <small>FLV 长连接对高延迟链路更稳；切换后播放器会重连</small>
+          </span>
+          <div class="proto-tabs" role="group" aria-label="直播传输协议">
+            <button id="protoAuto" type="button">自动</button>
+            <button id="protoFlv" type="button">FLV</button>
+          </div>
+        </div>
         <p id="benchmarkHint" class="hint">每轮最多测试 8 个候选，每个读取最多 256 KB。</p>
         <p id="bandwidthNotice" class="notice warning hidden"></p>
       </section>

@@ -45,6 +45,12 @@ Nothing yet.
   redirects to the target's fully signed URL while remaining old-prefix
   requests (HLS segments) are prefix-mapped to the target cluster (verified:
   same-name segments interchange across issuances).
+- Add an opt-in "FLV first" live transport toggle: one session rule rewrites
+  the player's own playurl API requests to `protocol=0` so Bilibili issues
+  the long-connection FLV stream (one-second-segment HLS pays a round-trip
+  tax per segment on high-RTT paths), and a page bridge calls
+  `livePlayer.reload()` so the change applies immediately. Requires the new
+  `api.live.bilibili.com` host permission.
 
 ## [1.8.4] - 2026-07-27
 

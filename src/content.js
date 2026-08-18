@@ -378,6 +378,13 @@
       sendResponse({ ok: true, activity: playbackActivity() });
       return false;
     }
+    if (message.type === "RELOAD_LIVE_PLAYER") {
+      document.dispatchEvent(
+        new CustomEvent("bilibili-cdn-switcher:reload-player")
+      );
+      sendResponse({ ok: true });
+      return false;
+    }
     if (message.type === "HARVEST_LIVE_PLAYURL") {
       harvestLivePlayurl()
         .then((result) => sendResponse({ ok: true, ...result }))

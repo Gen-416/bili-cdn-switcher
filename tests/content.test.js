@@ -27,6 +27,18 @@ test("直播测速前按冷却重放播放接口收割轮换候选", () => {
   assert.match(pageHook, /publish\(data, requestUrl\)/);
 });
 
+test("协议切换通过内容脚本桥请求播放器重连", () => {
+  assert.match(contentScript, /RELOAD_LIVE_PLAYER/);
+  assert.match(
+    contentScript,
+    /bilibili-cdn-switcher:reload-player/
+  );
+  assert.match(pageHook, /bilibili-cdn-switcher:reload-player/);
+  assert.match(pageHook, /window\.livePlayer\?\.reload\?\.\(\)/);
+  assert.match(serviceWorker, /SET_LIVE_PROTOCOL/);
+  assert.match(serviceWorker, /syncLiveProtocolRule/);
+});
+
 test("直播页使用直播健康阈值", () => {
   assert.match(
     contentScript,

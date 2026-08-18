@@ -263,6 +263,31 @@ input:disabled {
   font-weight: 700;
 }
 
+.proto-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 8px;
+  background: #e8eef2;
+}
+
+.proto-tabs button {
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 6px;
+  color: #5b6873;
+  background: transparent;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.proto-tabs button.active {
+  color: #007da7;
+  background: white;
+  box-shadow: 0 2px 7px rgb(36 69 90 / 10%);
+}
+
 .hint {
   margin-top: 7px;
   color: #84909a;

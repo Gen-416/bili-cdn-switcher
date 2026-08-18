@@ -26,6 +26,7 @@ import {
 } from "./core.js";
 import {
   buildLiveBenchmarkSpec,
+  buildLiveProtocolRule,
   buildLiveRedirectRules,
   isLivePlaylistUrl,
   latestLiveSegmentUrl,
@@ -39,6 +40,7 @@ import {
 const CONFIG_KEY = "config";
 const HOST_HEALTH_KEY = "hostHealth";
 const RULE_ID_OFFSET = 1_000_000;
+const LIVE_PROTOCOL_RULE_ID = 900_000;
 const QUICK_SAMPLE_BYTES = 128 * 1024;
 const SUSTAINED_SAMPLE_BYTES = 1024 * 1024;
 const QUICK_TEST_TIMEOUT_MS = 5000;
@@ -71,7 +73,8 @@ const DEFAULT_CONFIG = Object.freeze({
   autoBestHost: "",
   autoBestAt: 0,
   autoBestSchema: 0,
-  autoRefreshProfile: "balanced"
+  autoRefreshProfile: "balanced",
+  liveProtocolPreference: "auto"
 });
 
 function stateFor(tabId) {
@@ -121,7 +124,9 @@ async function getConfig() {
     disabledHosts: normalizeCdnHosts(config.disabledHosts),
     autoRefreshProfile: resolveAutoRefreshProfile(
       config.autoRefreshProfile
-    ).id
+    ).id,
+    liveProtocolPreference:
+      config.liveProtocolPreference === "flv" ? "flv" : "auto"
   };
 }
 
@@ -942,6 +947,36 @@ async function refreshPlayurlUrlsFromPage(tabId) {
   }
 }
 
+async function syncLiveProtocolRule(config) {
+  if (config.liveProtocolPreference === "flv") {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [LIVE_PROTOCOL_RULE_ID],
+      addRules: [buildLiveProtocolRule({ id: LIVE_PROTOCOL_RULE_ID })]
+    });
+  } else {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [LIVE_PROTOCOL_RULE_ID]
+    });
+  }
+}
+
+// 协议切换后旧流的观测、成绩与规则全部作废，等播放器重连后重新发现。
+async function resetLiveTab(tabId) {
+  const state = stateFor(tabId);
+  state.observedHost = "";
+  state.sampleUrl = "";
+  state.sampleRange = "";
+  state.livePlaylistUrl = "";
+  state.playurlUrls = [];
+  state.playurlVideoUrls = [];
+  state.autoHost = "";
+  state.autoAttempted = false;
+  state.nextAutoRefreshCheckAt = 0;
+  state.benchmarks = [];
+  state.stalledHosts = [];
+  await removeRule(tabId);
+}
+
 // 直播主机对按播放接口调用轮换分配，让页面按冷却重放一次播放器
 // 自己的 playurl 请求，把轮换签发的新集群并入候选池后再选测速对象。
 async function harvestLivePlayurlFromPage(tabId) {
@@ -1581,6 +1616,35 @@ async function handleMessage(message, sender) {
       await pushDiagnostics(tabId);
       return publicState(tabId);
     }
+    case "SET_LIVE_PROTOCOL": {
+      if (!["auto", "flv"].includes(message.preference)) {
+        throw new Error("直播协议偏好无效");
+      }
+      const next = await saveConfig({
+        liveProtocolPreference: message.preference
+      });
+      await syncLiveProtocolRule(next);
+      const tabs = await chrome.tabs.query({
+        url: ["https://live.bilibili.com/*"]
+      });
+      await Promise.all(
+        tabs
+          .filter((tab) => Number.isInteger(tab.id) && isPlaybackUrl(tab.url || ""))
+          .map(async (tab) => {
+            updatePageState(tab.id, tab.url || "");
+            await resetLiveTab(tab.id);
+            try {
+              await chrome.tabs.sendMessage(tab.id, {
+                type: "RELOAD_LIVE_PLAYER"
+              });
+            } catch {
+              // 内容脚本未注入时，播放器下一次自然重连也会生效。
+            }
+            await pushDiagnostics(tab.id);
+          })
+      );
+      return publicState(tabId);
+    }
     case "SET_TARGET": {
       const validation = validateCdnHost(message.host);
       if (!validation.ok) throw new Error(validation.error);
@@ -1649,6 +1713,11 @@ chrome.runtime.onInstalled.addListener(() => {
     chrome.storage.local.set({ [CONFIG_KEY]: config })
   );
 });
+
+// 会话规则不跨浏览器会话保留，service worker 每次启动时按配置重建。
+void getConfig()
+  .then((config) => syncLiveProtocolRule(config))
+  .catch(() => {});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender)

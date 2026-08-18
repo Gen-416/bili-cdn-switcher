@@ -13,6 +13,9 @@ const elements = {
   autoMode: document.querySelector("#autoMode"),
   manualMode: document.querySelector("#manualMode"),
   autoRefreshProfile: document.querySelector("#autoRefreshProfile"),
+  liveProtocolRow: document.querySelector("#liveProtocolRow"),
+  protoAuto: document.querySelector("#protoAuto"),
+  protoFlv: document.querySelector("#protoFlv"),
   benchmarkHint: document.querySelector("#benchmarkHint"),
   bandwidthNotice: document.querySelector("#bandwidthNotice"),
   candidateList: document.querySelector("#candidateList"),
@@ -199,6 +202,13 @@ function render() {
   elements.autoRefreshProfile.value =
     currentState.config.autoRefreshProfile || "balanced";
 
+  const liveProto = currentState.config.liveProtocolPreference || "auto";
+  elements.liveProtocolRow.classList.toggle("hidden", !currentState.live);
+  elements.protoAuto.disabled = !applicable || !currentState.live;
+  elements.protoFlv.disabled = !applicable || !currentState.live;
+  elements.protoAuto.classList.toggle("active", liveProto === "auto");
+  elements.protoFlv.classList.toggle("active", liveProto === "flv");
+
   elements.scopeNotice.classList.toggle("hidden", applicable);
   elements.scopeNotice.textContent =
     "请在 B 站视频、番剧、课程或直播间播放页打开此扩展。其他页面不会建立重定向规则。";
@@ -329,6 +339,20 @@ elements.autoRefreshProfile.addEventListener("change", async () => {
         profile: elements.autoRefreshProfile.value
       }),
     `已切换为${label}档`
+  );
+});
+
+elements.protoAuto.addEventListener("click", async () => {
+  await perform(
+    () => send("SET_LIVE_PROTOCOL", { preference: "auto" }),
+    "已恢复自动协议，播放器正在重连"
+  );
+});
+
+elements.protoFlv.addEventListener("click", async () => {
+  await perform(
+    () => send("SET_LIVE_PROTOCOL", { preference: "flv" }),
+    "已切换 FLV 优先，播放器正在重连"
   );
 });
 

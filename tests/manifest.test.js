@@ -75,6 +75,7 @@ test("host 权限只覆盖 B 站页面与 bilivideo 媒体", () => {
     "https://www.bilibili.com/*",
     "https://m.bilibili.com/*",
     "https://live.bilibili.com/*",
+    "https://api.live.bilibili.com/*",
     "https://*.bilivideo.com/*"
   ]);
 });

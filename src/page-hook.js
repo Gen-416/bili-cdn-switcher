@@ -220,4 +220,13 @@
   [0, 500, 1500, 5000].forEach((delay) =>
     setTimeout(inspectGlobals, delay)
   );
+
+  // 协议偏好切换后由扩展请求播放器重连，让新的 playurl 参数立即生效。
+  document.addEventListener("bilibili-cdn-switcher:reload-player", () => {
+    try {
+      window.livePlayer?.reload?.();
+    } catch {
+      // 播放器暂不可用时，下一次自然重连也会生效。
+    }
+  });
 })();

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildLiveBenchmarkSpec,
+  buildLiveProtocolRule,
   buildLiveRedirectRules,
   isLivePlaylistUrl,
   latestLiveSegmentUrl,
@@ -95,6 +96,21 @@ test("跨集群切换生成入口重定向与前缀映射双规则", () => {
     "https://d1--ov-gotcha05.bilivideo.com/live-bvc/504451/\\1"
   );
   assert.match(prefixRule.condition.regexFilter, /864118/);
+});
+
+test("FLV 优先规则只改写播放接口请求的 protocol 参数", () => {
+  const rule = buildLiveProtocolRule({ id: 900000 });
+  assert.equal(rule.action.type, "redirect");
+  assert.deepEqual(
+    rule.action.redirect.transform.queryTransform.addOrReplaceParams,
+    [{ key: "protocol", value: "0" }]
+  );
+  assert.equal("url" in rule.action.redirect, false);
+  assert.deepEqual(rule.condition.initiatorDomains, ["bilibili.com"]);
+  assert.deepEqual(rule.condition.resourceTypes, ["xmlhttprequest"]);
+  assert.match(rule.condition.regexFilter, /getRoomPlayInfo/);
+  assert.match(rule.condition.regexFilter, /getInfoByRoom/);
+  assert.match(rule.condition.regexFilter, /api\\\.live\\\.bilibili\\\.com/);
 });
 
 test("同集群兄弟节点不需要跨集群规则", () => {

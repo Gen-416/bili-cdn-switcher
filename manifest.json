@@ -21,6 +21,7 @@
     "https://www.bilibili.com/*",
     "https://m.bilibili.com/*",
     "https://live.bilibili.com/*",
+    "https://api.live.bilibili.com/*",
     "https://*.bilivideo.com/*"
   ],
   "background": {
